@@ -2,15 +2,14 @@ import os
 import asyncio
 import aiohttp
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from timezonefinder import TimezoneFinder
 
 load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
@@ -20,45 +19,21 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-tf = TimezoneFinder()
-scheduler = AsyncIOScheduler()
 
 API_URL = "https://api.jolpi.ca/ergast/f1"
 DB_PATH = "f1_users.db"
-LAST_NOTIFIED_RACE = ""
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                chat_id INTEGER PRIMARY KEY,
-                tz TEXT DEFAULT 'Europe/Moscow'
-            )
-        """)
-        conn.commit()
+        conn.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY)")
 
-def upsert_user(chat_id: int, tz: str = "Europe/Moscow"):
+def add_user(chat_id):
     with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO users(chat_id, tz) VALUES(?, ?)
-            ON CONFLICT(chat_id) DO UPDATE SET tz = excluded.tz
-        """, (chat_id, tz))
-        conn.commit()
+        conn.execute("INSERT OR IGNORE INTO users (chat_id) VALUES (?)", (chat_id,))
 
-def get_user_tz(chat_id: int) -> str:
+def get_users():
     with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("SELECT tz FROM users WHERE chat_id=?", (chat_id,))
-        row = c.fetchone()
-        return row[0] if row else "Europe/Moscow"
-
-def get_all_users():
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("SELECT chat_id FROM users")
-        return [row[0] for row in c.fetchall()]
+        return [row[0] for row in conn.execute("SELECT chat_id FROM users")]
 
 async def fetch_f1_data(endpoint: str) -> dict:
     async with aiohttp.ClientSession() as session:
@@ -71,129 +46,81 @@ def get_reply_keyboard():
     keyboard = [
         [KeyboardButton(text="📅 Ближайший этап"), KeyboardButton(text="🏁 Последняя гонка")],
         [KeyboardButton(text="🏆 Личный зачет"), KeyboardButton(text="🏎 Кубок конструкторов")],
-        [KeyboardButton(text="📊 Сравнение телеметрии"), KeyboardButton(text="⚙️ Настройки времени")],
+        [KeyboardButton(text="📊 Сравнение телеметрии")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
-def get_tz_keyboard():
-    keyboard = [
-        [KeyboardButton(text="📍 Определить по геопозиции", request_location=True)],
-        [KeyboardButton(text="⬅️ В главное меню")]
+def extract_all_sessions(race_data: dict) -> list:
+    sessions = []
+    keys_map = [
+        ('FirstPractice', '🏎 Первая тренировка'),
+        ('SecondPractice', '🏎 Вторая тренировка'),
+        ('ThirdPractice', '🏎 Третья тренировка'),
+        ('SprintQualifying', '⏱ Спринт-квалификация'),
+        ('Sprint', '🔥 Спринт'),
+        ('Qualifying', '⏱ Квалификация к гонке')
     ]
-    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
-
-def format_f1_time(date_str: str, time_str: str, user_tz: str) -> str:
-    if not time_str:
-        return date_str
-    try:
-        dt_str = f"{date_str} {time_str}"
-        dt_utc = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
-        dt_local = dt_utc.astimezone(ZoneInfo(user_tz))
-        return dt_local.strftime("%d.%m в %H:%M")
-    except ValueError:
-        return f"{date_str} {time_str}"
-
-async def check_race_reminders():
-    global LAST_NOTIFIED_RACE
-    data = await fetch_f1_data("current/next")
     
+    for key, name in keys_map:
+        if key in race_data:
+            sessions.append({
+                'name': name,
+                'date': race_data[key].get('date'),
+                'time': race_data[key].get('time', '00:00:00Z')
+            })
+            
+    sessions.append({
+        'name': '🏁 Главная гонка',
+        'date': race_data.get('date'),
+        'time': race_data.get('time', '00:00:00Z')
+    })
+    
+    return sessions
+
+async def check_schedule_and_notify():
+    data = await fetch_f1_data("current/next")
     if not data:
         return
 
     try:
         race = data['MRData']['RaceTable']['Races'][0]
-        race_id = race.get('round')
-        
-        if LAST_NOTIFIED_RACE == race_id:
-            return
-
-        date_str = race['date']
-        time_str = race.get('time', '')
-        if not time_str:
-            return
-
-        dt_str = f"{date_str} {time_str}"
-        dt_utc = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
+        race_name = race['raceName']
+        sessions = extract_all_sessions(race)
         now_utc = datetime.now(ZoneInfo("UTC"))
         
-        time_diff = dt_utc - now_utc
-        
-        if timedelta(minutes=0) < time_diff <= timedelta(minutes=65):
-            LAST_NOTIFIED_RACE = race_id
-            users = get_all_users()
+        for sess in sessions:
+            if not sess['date'] or not sess['time']:
+                continue
+                
+            dt_utc = datetime.strptime(f"{sess['date']} {sess['time']}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
+            delta = (dt_utc - now_utc).total_seconds()
             
-            for chat_id in users:
-                try:
-                    await bot.send_message(
-                        chat_id, 
-                        f"🚨 *Внимание!*\nГонка *{race['raceName']}* стартует менее чем через час!",
-                        parse_mode="Markdown"
-                    )
-                except Exception:
-                    pass
-    except (KeyError, IndexError):
+            if 3300 <= delta <= 3600:
+                dt_moscow = dt_utc.astimezone(ZoneInfo("Europe/Moscow")).strftime("%H:%M")
+                msg = f"🔔 *Напоминание!*\n\n{sess['name']} в рамках {race_name} начнется ровно через час (в {dt_moscow} по Мск)!"
+                
+                for chat_id in get_users():
+                    try:
+                        await bot.send_message(chat_id, msg, parse_mode="Markdown")
+                    except Exception:
+                        pass
+    except Exception:
         pass
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    upsert_user(message.chat.id)
+    add_user(message.chat.id)
     welcome_text = (
         "Привет, фанат автоспорта! 🏎💨\n\n"
-        "Я — бот-помощник по Формуле-1. Я подключен к живой базе данных и знаю всё о текущем сезоне.\n"
-        "Используй кнопки внизу экрана для навигации!"
+        "Я буду присылать тебе напоминания за час до старта каждой квалификации и гонки.\n"
+        "Используй кнопки внизу для навигации!"
     )
     await message.answer(welcome_text, reply_markup=get_reply_keyboard())
 
-@dp.message(F.text == '⚙️ Настройки времени')
-async def settings_menu(message: types.Message):
-    user_tz = get_user_tz(message.chat.id)
-    text = (
-        f"Твой текущий часовой пояс: `{user_tz}`\n\n"
-        "Ты можешь установить его двумя способами:\n"
-        "1. Нажать кнопку *Определить по геопозиции* внизу\n"
-        "2. Ввести вручную командой: `/settz Europe/London`"
-    )
-    await message.answer(text, parse_mode="Markdown", reply_markup=get_tz_keyboard())
-
-@dp.message(F.text == '⬅️ В главное меню')
-async def back_to_main(message: types.Message):
-    await message.answer("Главное меню:", reply_markup=get_reply_keyboard())
-
-@dp.message(F.location)
-async def handle_location(message: types.Message):
-    lat = message.location.latitude
-    lon = message.location.longitude
-    
-    tz_name = tf.timezone_at(lng=lon, lat=lat)
-    
-    if tz_name:
-        upsert_user(message.chat.id, tz_name)
-        await message.answer(
-            f"✅ Часовой пояс успешно обновлен на `{tz_name}`!", 
-            parse_mode="Markdown",
-            reply_markup=get_reply_keyboard()
-        )
-    else:
-        await message.answer("❌ Не удалось определить часовой пояс по этим координатам.")
-
-@dp.message(Command("settz"))
-async def set_tz_manual(message: types.Message):
-    parts = message.text.split()
-    if len(parts) != 2:
-        await message.answer("Формат команды: `/settz Europe/Moscow`", parse_mode="Markdown")
-        return
-        
-    tz_name = parts[1]
-    try:
-        ZoneInfo(tz_name)
-        upsert_user(message.chat.id, tz_name)
-        await message.answer(f"✅ Часовой пояс установлен на `{tz_name}`!", parse_mode="Markdown")
-    except Exception:
-        await message.answer("❌ Неверный формат часового пояса. Пример: `Europe/London`", parse_mode="Markdown")
-
 @dp.message(F.text == '📅 Ближайший этап')
 async def process_next_race(message: types.Message):
-    tmp_msg = await message.answer("🔄 Загружаю актуальное расписание...")
+    add_user(message.chat.id)
+    tmp_msg = await message.answer("🔄 Загружаю расписание...")
     data = await fetch_f1_data("current/next")
     
     if not data:
@@ -204,121 +131,105 @@ async def process_next_race(message: types.Message):
         race = data['MRData']['RaceTable']['Races'][0]
         race_name = race['raceName']
         circuit = race['Circuit']['circuitName']
-        user_tz = get_user_tz(message.chat.id)
         
-        schedule_text = ""
-        sessions = [
-            ('FirstPractice', '🏎 Практика 1'),
-            ('SecondPractice', '🏎 Практика 2'),
-            ('ThirdPractice', '🏎 Практика 3'),
-            ('Qualifying', '⏱ Квалификация'),
-            ('Sprint', '🔥 Спринт')
-        ]
+        sessions = extract_all_sessions(race)
         
-        for key, name in sessions:
-            if key in race:
-                dt = format_f1_time(race[key]['date'], race[key].get('time', ''), user_tz)
-                schedule_text += f"{name}: {dt}\n"
+        ru_days = {0: 'Понедельник', 1: 'Вторник', 2: 'Среда', 3: 'Четверг', 4: 'Пятница', 5: 'Суббота', 6: 'Воскресенье'}
+        schedule_by_date = {}
+        
+        for sess in sessions:
+            if not sess['date'] or not sess['time']:
+                continue
                 
-        race_dt = format_f1_time(race['date'], race.get('time', ''), user_tz)
+            dt_utc = datetime.strptime(f"{sess['date']} {sess['time']}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
+            dt_local = dt_utc.astimezone(ZoneInfo("Europe/Moscow"))
+            
+            date_key = f"{ru_days[dt_local.weekday()]}, {dt_local.strftime('%d.%m')}"
+            time_str = dt_local.strftime("%H:%M")
+            
+            if date_key not in schedule_by_date:
+                schedule_by_date[date_key] = []
+            schedule_by_date[date_key].append(f"{time_str} — {sess['name']}")
         
-        text = (
-            f"📅 *Ближайший уик-энд: {race_name}*\n"
-            f"📍 Трасса: {circuit}\n\n"
-            f"*Расписание сессий:*\n"
-            f"{schedule_text}"
-            f"🏁 *Гонка: {race_dt}*\n\n"
-            f"_(Время: {user_tz})_"
-        )
-    except (KeyError, IndexError):
-        text = "🤷‍♂️ Не удалось распарсить данные о следующей гонке. Возможно, сезон окончен."
+        text = f"📅 *{race_name}*\n📍 Трасса: {circuit}\n\n*Расписание (время московское):*\n\n"
+        
+        for date_key, events in schedule_by_date.items():
+            text += f"*{date_key}:*\n"
+            for event in events:
+                text += f"{event}\n"
+            text += "\n"
+            
+    except Exception:
+        text = "🤷‍♂️ Не удалось распарсить данные о следующей гонке."
         
     await tmp_msg.edit_text(text, parse_mode="Markdown")
 
 @dp.message(F.text == '🏁 Последняя гонка')
 async def process_last_race(message: types.Message):
+    add_user(message.chat.id)
     tmp_msg = await message.answer("🔄 Загружаю результаты...")
     data = await fetch_f1_data("current/last/results")
     
-    if not data:
-        await tmp_msg.edit_text("❌ Ошибка получения данных.")
-        return
-
-    try:
-        race = data['MRData']['RaceTable']['Races'][0]
-        race_name = race['raceName']
-        results = race['Results'][:5]
-        
-        text = f"🏁 *Итоги: {race_name}*\n\n"
-        for res in results:
-            pos = res['position']
-            driver = res['Driver']['familyName']
-            team = res['Constructor']['name']
-            points = res['points']
-            text += f"{pos}. {driver} ({team}) — {points} очков\n"
-    except (KeyError, IndexError):
-        text = "🤷‍♂️ Не удалось загрузить результаты."
-        
-    await tmp_msg.edit_text(text, parse_mode="Markdown")
+    if data:
+        try:
+            race = data['MRData']['RaceTable']['Races'][0]
+            text = f"🏁 *Итоги: {race['raceName']}*\n\n"
+            for res in race['Results'][:5]:
+                text += f"{res['position']}. {res['Driver']['familyName']} ({res['Constructor']['name']}) — {res['points']} очков\n"
+            await tmp_msg.edit_text(text, parse_mode="Markdown")
+            return
+        except KeyError:
+            pass
+    await tmp_msg.edit_text("🤷‍♂️ Ошибка получения результатов.")
 
 @dp.message(F.text == '🏆 Личный зачет')
 async def process_drivers(message: types.Message):
+    add_user(message.chat.id)
     tmp_msg = await message.answer("🔄 Загружаю таблицу...")
     data = await fetch_f1_data("current/driverStandings")
     
-    if not data:
-        await tmp_msg.edit_text("❌ Ошибка получения данных.")
-        return
-
-    try:
-        standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][:10]
-        
-        text = "🏆 *Личный зачет (Топ-10):*\n\n"
-        for driver in standings:
-            pos = driver['position']
-            name = driver['Driver']['familyName']
-            points = driver['points']
-            text += f"{pos}. {name} — {points} очков\n"
-    except (KeyError, IndexError):
-        text = "🤷‍♂️ Данные чемпионата пока недоступны."
-        
-    await tmp_msg.edit_text(text, parse_mode="Markdown")
+    if data:
+        try:
+            standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][:10]
+            text = "🏆 *Личный зачет (Топ-10):*\n\n"
+            for driver in standings:
+                text += f"{driver['position']}. {driver['Driver']['familyName']} — {driver['points']} очков\n"
+            await tmp_msg.edit_text(text, parse_mode="Markdown")
+            return
+        except KeyError:
+            pass
+    await tmp_msg.edit_text("🤷‍♂️ Данные пока недоступны.")
 
 @dp.message(F.text == '🏎 Кубок конструкторов')
 async def process_teams(message: types.Message):
+    add_user(message.chat.id)
     tmp_msg = await message.answer("🔄 Загружаю Кубок...")
     data = await fetch_f1_data("current/constructorStandings")
     
-    if not data:
-        await tmp_msg.edit_text("❌ Ошибка получения данных.")
-        return
-
-    try:
-        standings = data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings']
-        
-        text = "🏎 *Кубок конструкторов:*\n\n"
-        for team in standings:
-            pos = team['position']
-            name = team['Constructor']['name']
-            points = team['points']
-            text += f"{pos}. {name} — {points} очков\n"
-    except (KeyError, IndexError):
-        text = "🤷‍♂️ Данные пока недоступны."
-        
-    await tmp_msg.edit_text(text, parse_mode="Markdown")
+    if data:
+        try:
+            standings = data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings']
+            text = "🏎 *Кубок конструкторов:*\n\n"
+            for team in standings:
+                text += f"{team['position']}. {team['Constructor']['name']} — {team['points']} очков\n"
+            await tmp_msg.edit_text(text, parse_mode="Markdown")
+            return
+        except KeyError:
+            pass
+    await tmp_msg.edit_text("🤷‍♂️ Данные пока недоступны.")
 
 @dp.message(F.text == '📊 Сравнение телеметрии')
 async def process_telemetry(message: types.Message):
-    text = (
-        "📊 *Модуль телеметрии*\n"
-        "Эта фича находится в разработке. Скоро здесь будут крутые графики прохождения секторов!"
-    )
-    await message.answer(text, parse_mode="Markdown")
+    add_user(message.chat.id)
+    await message.answer("📊 *Модуль телеметрии*\nСкоро здесь будут графики!", parse_mode="Markdown")
 
 async def main():
     init_db()
-    scheduler.add_job(check_race_reminders, 'interval', minutes=5)
+    
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check_schedule_and_notify, 'interval', minutes=5)
     scheduler.start()
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
