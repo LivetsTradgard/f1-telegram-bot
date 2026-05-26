@@ -128,8 +128,8 @@ async def check_schedule_and_notify():
                         await bot.send_message(user['chat_id'], msg, parse_mode="Markdown")
                     except Exception:
                         pass
-    except Exception as e:
-        print(f"Ошибка в планировщике: {e}")
+    except Exception:
+        pass
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -149,13 +149,13 @@ async def cmd_start(message: types.Message):
 async def info_menu(message: types.Message):
     add_user(message.chat.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏎 Профили топ-пилотов", callback_data="info_drivers")],
+        [InlineKeyboardButton(text="🏎 Профили всех пилотов", callback_data="info_drivers")],
         [InlineKeyboardButton(text="📍 Инфо о текущей трассе", callback_data="info_circuit")]
     ])
     await message.answer("Что именно вас интересует?", reply_markup=kb)
 
 @dp.callback_query(F.data == 'info_drivers')
-async def list_top_drivers(callback: types.CallbackQuery):
+async def list_all_drivers(callback: types.CallbackQuery):
     data = await fetch_f1_data("current/driverStandings")
     if not data:
         await callback.message.edit_text("❌ Ошибка получения данных.")
@@ -163,12 +163,21 @@ async def list_top_drivers(callback: types.CallbackQuery):
         return
 
     try:
-        standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][:5]
+        standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
         buttons = []
+        row = []
+        
         for d in standings:
             driver_id = d['Driver']['driverId']
             name = f"{d['Driver']['givenName']} {d['Driver']['familyName']}"
-            buttons.append([InlineKeyboardButton(text=name, callback_data=f"profile_{driver_id}")])
+            row.append(InlineKeyboardButton(text=name, callback_data=f"profile_{driver_id}"))
+            
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+                
+        if row:
+            buttons.append(row)
             
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_info")])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -180,43 +189,48 @@ async def list_top_drivers(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith('profile_'))
 async def show_driver_profile(callback: types.CallbackQuery):
     driver_id = callback.data.split('_')[1]
+    data = await fetch_f1_data("current/driverStandings")
     
-    data_bio = await fetch_f1_data(f"drivers/{driver_id}")
-    data_stats = await fetch_f1_data(f"drivers/{driver_id}/driverStandings")
-    
-    if not data_bio or not data_stats:
+    if not data:
         await callback.message.edit_text("❌ Ошибка получения данных о пилоте.")
         await callback.answer()
         return
 
     try:
-        driver = data_bio['MRData']['DriverTable']['Drivers'][0]
-        name = f"{driver['givenName']} {driver['familyName']}"
-        code = driver.get('code', '')
-        number = driver.get('permanentNumber', '')
-        dob = driver['dateOfBirth']
-        nationality = driver['nationality']
-        url = driver['url']
+        standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
+        driver_info = None
         
-        try:
-            lists = data_stats['MRData']['StandingsTable']['StandingsLists']
-            titles = 0
-            total_points = 0.0
-            for l in lists:
-                pos = l['DriverStandings'][0]['position']
-                total_points += float(l['DriverStandings'][0]['points'])
-                if pos == "1":
-                    titles += 1
-            stats_text = f"🏆 Титулов чемпиона мира: {titles}\n💯 Очков за карьеру: {int(total_points)}"
-        except Exception:
-            stats_text = "📊 Статистика за карьеру временно недоступна."
-
+        for d in standings:
+            if d['Driver']['driverId'] == driver_id:
+                driver_info = d
+                break
+                
+        if not driver_info:
+            await callback.message.edit_text("🤷‍♂️ Пилот не найден.")
+            return
+            
+        driver = driver_info['Driver']
+        team = driver_info['Constructors'][0]['name']
+        
+        name = f"{driver['givenName']} {driver['familyName']}"
+        code = driver.get('code', 'N/A')
+        number = driver.get('permanentNumber', 'N/A')
+        dob = driver.get('dateOfBirth', 'N/A')
+        nationality = driver.get('nationality', 'N/A')
+        url = driver.get('url', '')
+        
+        pos = driver_info.get('position', 'N/A')
+        points = driver_info.get('points', '0')
+        
         text = (
-            f"🏎 *Профиль пилота: {name} ({code})*\n"
-            f"🔢 Постоянный номер: {number}\n"
-            f"🌍 Национальность: {nationality}\n"
+            f"🏎 *Профиль: {name} ({code})*\n"
+            f"🏎 Команда: {team}\n"
+            f"🔢 Номер болида: {number}\n"
+            f"🌍 Нация: {nationality}\n"
             f"📅 Дата рождения: {dob}\n\n"
-            f"{stats_text}\n\n"
+            f"📊 *Текущий сезон:*\n"
+            f"🏆 Позиция в чемпионате: {pos}\n"
+            f"💯 Очков: {points}\n\n"
             f"🔗 [Страница в Википедии]({url})"
         )
         
@@ -224,8 +238,9 @@ async def show_driver_profile(callback: types.CallbackQuery):
             [InlineKeyboardButton(text="⬅️ К списку пилотов", callback_data="info_drivers")]
         ])
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+        
     except Exception:
-        await callback.message.edit_text("🤷‍♂️ Не удалось распарсить профиль.")
+        await callback.message.edit_text("🤷‍♂️ Ошибка при обработке профиля.")
     await callback.answer()
 
 @dp.callback_query(F.data == 'info_circuit')
@@ -266,10 +281,10 @@ async def show_circuit_info(callback: types.CallbackQuery):
 @dp.callback_query(F.data == 'back_to_info')
 async def back_to_info_menu(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏎 Профили топ-пилотов", callback_data="info_drivers")],
+        [InlineKeyboardButton(text="🏎 Профили всех пилотов", callback_data="info_drivers")],
         [InlineKeyboardButton(text="📍 Инфо о текущей трассе", callback_data="info_circuit")]
     ])
-    await callback.message.edit_text("What exactly interests you?", reply_markup=kb)
+    await callback.message.edit_text("Что именно вас интересует?", reply_markup=kb)
     await callback.answer()
 
 @dp.message(F.text == '⚙️ Настройки')
