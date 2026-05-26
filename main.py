@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
@@ -22,6 +24,9 @@ dp = Dispatcher()
 
 API_URL = "https://api.jolpi.ca/ergast/f1"
 DB_PATH = "f1_users.db"
+
+class Archive(StatesGroup):
+    waiting_for_year = State()
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -55,8 +60,8 @@ def get_reply_keyboard():
     keyboard = [
         [KeyboardButton(text="📅 Ближайший этап"), KeyboardButton(text="🏁 Последняя гонка")],
         [KeyboardButton(text="🏆 Личный зачет"), KeyboardButton(text="🏎 Кубок конструкторов")],
-        [KeyboardButton(text="📊 Сравнение телеметрии"), KeyboardButton(text="🔎 Инфо и Профили")],
-        [KeyboardButton(text="⚙️ Настройки")]
+        [KeyboardButton(text="🔎 Инфо и Профили"), KeyboardButton(text="📜 Архив сезонов")],
+        [KeyboardButton(text="📊 Сравнение телеметрии"), KeyboardButton(text="⚙️ Настройки")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -201,7 +206,7 @@ async def show_driver_profile(callback: types.CallbackQuery):
         driver_info = None
         
         for d in standings:
-            if d['Driver']['driverId'] == driver_id:
+            if d.get('Driver', {}).get('driverId') == driver_id:
                 driver_info = d
                 break
                 
@@ -209,10 +214,10 @@ async def show_driver_profile(callback: types.CallbackQuery):
             await callback.message.edit_text("🤷‍♂️ Пилот не найден.")
             return
             
-        driver = driver_info['Driver']
-        team = driver_info['Constructors'][0]['name']
+        driver = driver_info.get('Driver', {})
+        team = driver_info.get('Constructors', [{'name': 'N/A'}])[0].get('name', 'N/A')
         
-        name = f"{driver['givenName']} {driver['familyName']}"
+        name = f"{driver.get('givenName', '')} {driver.get('familyName', '')}".strip()
         code = driver.get('code', 'N/A')
         number = driver.get('permanentNumber', 'N/A')
         dob = driver.get('dateOfBirth', 'N/A')
@@ -253,13 +258,14 @@ async def show_circuit_info(callback: types.CallbackQuery):
 
     try:
         race = data['MRData']['RaceTable']['Races'][0]
-        circuit = race['Circuit']
-        name = circuit['circuitName']
-        locality = circuit['Location']['locality']
-        country = circuit['Location']['country']
-        lat = circuit['Location']['lat']
-        lng = circuit['Location']['long']
-        url = circuit['url']
+        circuit = race.get('Circuit', {})
+        name = circuit.get('circuitName', 'N/A')
+        location = circuit.get('Location', {})
+        locality = location.get('locality', 'N/A')
+        country = location.get('country', 'N/A')
+        lat = location.get('lat', 'N/A')
+        lng = location.get('long', 'N/A')
+        url = circuit.get('url', '')
         
         text = (
             f"📍 *Информация о текущей трассе*\n\n"
@@ -286,6 +292,54 @@ async def back_to_info_menu(callback: types.CallbackQuery):
     ])
     await callback.message.edit_text("Что именно вас интересует?", reply_markup=kb)
     await callback.answer()
+
+@dp.message(F.text == '📜 Архив сезонов')
+async def archive_menu(message: types.Message, state: FSMContext):
+    add_user(message.chat.id)
+    await message.answer("Введите год (с 1950 по текущий), чтобы получить исторические итоги сезона:", reply_markup=types.ReplyKeyboardRemove())
+    await state.set_state(Archive.waiting_for_year)
+
+@dp.message(Archive.waiting_for_year)
+async def process_archive_year(message: types.Message, state: FSMContext):
+    year_str = message.text.strip()
+    if not year_str.isdigit() or not (1950 <= int(year_str) <= datetime.now().year):
+        await message.answer("❌ Пожалуйста, введите корректный год (например, 2008).")
+        return
+        
+    await state.clear()
+    tmp_msg = await message.answer(f"🔄 Поднимаю архивы за {year_str} год...", reply_markup=get_reply_keyboard())
+    
+    driver_data = await fetch_f1_data(f"{year_str}/driverStandings")
+    team_data = await fetch_f1_data(f"{year_str}/constructorStandings")
+    races_data = await fetch_f1_data(f"{year_str}/results/1")
+    
+    text = f"📜 *Итоги сезона {year_str}*\n\n"
+    
+    try:
+        champion = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][0]
+        champ_name = f"{champion['Driver']['givenName']} {champion['Driver']['familyName']}"
+        text += f"👑 *Чемпион мира:* {champ_name} ({champion['points']} очков)\n"
+    except Exception:
+        text += "👑 *Чемпион мира:* Данных нет\n"
+        
+    try:
+        team_champ = team_data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings'][0]
+        text += f"🏎 *Кубок конструкторов:* {team_champ['Constructor']['name']} ({team_champ['points']} очков)\n\n"
+    except Exception:
+        text += "🏎 *Кубок конструкторов:* Данных нет (кубок вручается с 1958 года)\n\n"
+        
+    try:
+        races = races_data['MRData']['RaceTable']['Races']
+        text += "*Победители Гран-при:*\n"
+        for r in races:
+            race_name = r['raceName'].replace(' Grand Prix', '')
+            winner = r['Results'][0]['Driver']['familyName']
+            time_str = r['Results'][0].get('Time', {}).get('time', 'N/A')
+            text += f"🏁 {race_name}: {winner} ({time_str})\n"
+    except Exception:
+        text += "Нет данных по отдельным гонкам.\n"
+        
+    await tmp_msg.edit_text(text, parse_mode="Markdown")
 
 @dp.message(F.text == '⚙️ Настройки')
 async def settings_menu(message: types.Message):
