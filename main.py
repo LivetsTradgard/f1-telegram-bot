@@ -51,7 +51,7 @@ def get_user_settings():
 
 async def fetch_f1_data(endpoint: str) -> dict:
     try:
-        timeout = aiohttp.ClientTimeout(total=15)
+        timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(f"{API_URL}/{endpoint}.json") as response:
                 if response.status == 200:
@@ -198,7 +198,7 @@ async def list_all_drivers(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith('profile_'))
 async def show_driver_profile(callback: types.CallbackQuery):
-    driver_id = callback.data[8:] # Безопасная обрезка строки "profile_"
+    driver_id = callback.data[8:]
     data = await fetch_f1_data("current/driverStandings")
     
     if not data:
@@ -314,12 +314,27 @@ async def process_archive_year(message: types.Message, state: FSMContext):
     await state.clear()
     tmp_msg = await message.answer(f"🔄 Запрашиваю архивы за {year_str} год...\n_(Это может занять пару секунд)_", reply_markup=get_reply_keyboard())
     
-    driver_data = await fetch_f1_data(f"{year_str}/driverStandings")
-    await asyncio.sleep(0.5)
-    team_data = await fetch_f1_data(f"{year_str}/constructorStandings")
-    await asyncio.sleep(0.5)
-    races_data = await fetch_f1_data(f"{year_str}/results/1")
+    driver_data, team_data, races_data = None, None, None
     
+    try:
+        # Создаем одну общую сессию для всех запросов архива
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            
+            async with session.get(f"{API_URL}/{year_str}/driverStandings.json") as r:
+                if r.status == 200: driver_data = await r.json()
+            await asyncio.sleep(0.2)
+            
+            async with session.get(f"{API_URL}/{year_str}/constructorStandings.json") as r:
+                if r.status == 200: team_data = await r.json()
+            await asyncio.sleep(0.2)
+            
+            async with session.get(f"{API_URL}/{year_str}/results/1.json") as r:
+                if r.status == 200: races_data = await r.json()
+                
+    except Exception as e:
+        print(f"Ошибка загрузки архива: {e}")
+        
     text = f"📜 <b>Итоги сезона {year_str}</b>\n\n"
     
     if driver_data and 'MRData' in driver_data:
@@ -339,7 +354,7 @@ async def process_archive_year(message: types.Message, state: FSMContext):
         except Exception:
             text += "🏎 <b>Кубок конструкторов:</b> Данных нет (возможно, кубок еще не вручался)\n\n"
     else:
-        text += "🏎 <b>Кубок конструкторов:</b> Ошибка API или кубок не вручался\n\n"
+        text += "🏎 <b>Кубок конструкторов:</b> Кубок не вручался или ошибка API\n\n"
             
     if races_data and 'MRData' in races_data:
         try:
@@ -359,7 +374,7 @@ async def process_archive_year(message: types.Message, state: FSMContext):
             
     try:
         await tmp_msg.edit_text(text, parse_mode="HTML")
-    except Exception as e:
+    except Exception:
         await tmp_msg.edit_text("❌ Произошла ошибка при форматировании текста архива.")
 
 @dp.message(F.text == '⚙️ Настройки')
