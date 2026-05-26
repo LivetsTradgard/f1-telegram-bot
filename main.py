@@ -50,11 +50,16 @@ def get_user_settings():
         return [{"chat_id": row[0], "notify_time": row[1]} for row in conn.execute("SELECT chat_id, notify_time FROM users")]
 
 async def fetch_f1_data(endpoint: str) -> dict:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{API_URL}/{endpoint}.json", timeout=15) as response:
-            if response.status == 200:
-                return await response.json()
-            return None
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{API_URL}/{endpoint}.json") as response:
+                if response.status == 200:
+                    return await response.json()
+                return None
+    except Exception as e:
+        print(f"API Error ({endpoint}): {e}")
+        return None
 
 def get_reply_keyboard():
     keyboard = [
@@ -193,7 +198,7 @@ async def list_all_drivers(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith('profile_'))
 async def show_driver_profile(callback: types.CallbackQuery):
-    driver_id = callback.data.replace('profile_', '')
+    driver_id = callback.data[8:] # Безопасная обрезка строки "profile_"
     data = await fetch_f1_data("current/driverStandings")
     
     if not data:
@@ -307,50 +312,55 @@ async def process_archive_year(message: types.Message, state: FSMContext):
         return
         
     await state.clear()
-    tmp_msg = await message.answer(f"🔄 Поднимаю архивы за {year_str} год...", reply_markup=get_reply_keyboard())
+    tmp_msg = await message.answer(f"🔄 Запрашиваю архивы за {year_str} год...\n_(Это может занять пару секунд)_", reply_markup=get_reply_keyboard())
     
+    driver_data = await fetch_f1_data(f"{year_str}/driverStandings")
+    await asyncio.sleep(0.5)
+    team_data = await fetch_f1_data(f"{year_str}/constructorStandings")
+    await asyncio.sleep(0.5)
+    races_data = await fetch_f1_data(f"{year_str}/results/1")
+    
+    text = f"📜 <b>Итоги сезона {year_str}</b>\n\n"
+    
+    if driver_data and 'MRData' in driver_data:
+        try:
+            champion = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][0]
+            champ_name = f"{champion['Driver']['givenName']} {champion['Driver']['familyName']}"
+            text += f"👑 <b>Чемпион мира:</b> {champ_name} ({champion['points']} очков)\n"
+        except Exception:
+            text += "👑 <b>Чемпион мира:</b> Данных нет\n"
+    else:
+        text += "👑 <b>Чемпион мира:</b> Ошибка API\n"
+            
+    if team_data and 'MRData' in team_data:
+        try:
+            team_champ = team_data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings'][0]
+            text += f"🏎 <b>Кубок конструкторов:</b> {team_champ['Constructor']['name']} ({team_champ['points']} очков)\n\n"
+        except Exception:
+            text += "🏎 <b>Кубок конструкторов:</b> Данных нет (возможно, кубок еще не вручался)\n\n"
+    else:
+        text += "🏎 <b>Кубок конструкторов:</b> Ошибка API или кубок не вручался\n\n"
+            
+    if races_data and 'MRData' in races_data:
+        try:
+            races = races_data['MRData']['RaceTable']['Races']
+            text += "<b>Победители Гран-при:</b>\n"
+            for r in races:
+                try:
+                    race_name = r['raceName'].replace(' Grand Prix', '')
+                    winner = r['Results'][0]['Driver']['familyName']
+                    text += f"🏁 {race_name}: {winner}\n"
+                except Exception:
+                    continue
+        except Exception:
+            text += "Нет данных по отдельным гонкам.\n"
+    else:
+        text += "Нет данных по гонкам.\n"
+            
     try:
-        task_drivers = asyncio.create_task(fetch_f1_data(f"{year_str}/driverStandings"))
-        task_teams = asyncio.create_task(fetch_f1_data(f"{year_str}/constructorStandings"))
-        task_races = asyncio.create_task(fetch_f1_data(f"{year_str}/results/1"))
-        
-        driver_data, team_data, races_data = await asyncio.gather(task_drivers, task_teams, task_races)
-        
-        text = f"📜 <b>Итоги сезона {year_str}</b>\n\n"
-        
-        if driver_data and 'MRData' in driver_data:
-            try:
-                champion = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][0]
-                champ_name = f"{champion['Driver']['givenName']} {champion['Driver']['familyName']}"
-                text += f"👑 <b>Чемпион мира:</b> {champ_name} ({champion['points']} очков)\n"
-            except Exception:
-                text += "👑 <b>Чемпион мира:</b> Данных нет\n"
-                
-        if team_data and 'MRData' in team_data:
-            try:
-                team_champ = team_data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings'][0]
-                text += f"🏎 <b>Кубок конструкторов:</b> {team_champ['Constructor']['name']} ({team_champ['points']} очков)\n\n"
-            except Exception:
-                text += "🏎 <b>Кубок конструкторов:</b> Данных нет\n\n"
-                
-        if races_data and 'MRData' in races_data:
-            try:
-                races = races_data['MRData']['RaceTable']['Races']
-                text += "<b>Победители Гран-при:</b>\n"
-                for r in races:
-                    try:
-                        race_name = r['raceName'].replace(' Grand Prix', '')
-                        winner = r['Results'][0]['Driver']['familyName']
-                        time_str = r['Results'][0].get('Time', {}).get('time', 'N/A')
-                        text += f"🏁 {race_name}: {winner} ({time_str})\n"
-                    except Exception:
-                        continue
-            except Exception:
-                text += "Нет данных по отдельным гонкам.\n"
-                
         await tmp_msg.edit_text(text, parse_mode="HTML")
-    except Exception:
-        await tmp_msg.edit_text("❌ Произошла ошибка при загрузке архива.")
+    except Exception as e:
+        await tmp_msg.edit_text("❌ Произошла ошибка при форматировании текста архива.")
 
 @dp.message(F.text == '⚙️ Настройки')
 async def settings_menu(message: types.Message):
