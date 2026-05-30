@@ -313,12 +313,15 @@ async def process_archive_year(message: types.Message, state: FSMContext):
         return
         
     await state.clear()
-    tmp_msg = await message.answer(f"🔄 Извлекаю топ-5 пилотов за {year_str} год...", reply_markup=get_reply_keyboard())
+    
+    # Отправляем сообщение-заглушку БЕЗ клавиатуры, чтобы избежать ошибки "message can't be edited"
+    tmp_msg = await message.answer(f"🔄 Извлекаю топ-5 пилотов за {year_str} год...")
     
     driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 5})
     
     if not driver_data or 'MRData' not in driver_data:
-        await tmp_msg.edit_text("❌ Сервер API недоступен или вернул ошибку. Попробуйте позже.")
+        await tmp_msg.delete()
+        await message.answer("❌ Сервер API недоступен или вернул ошибку. Попробуйте позже.", reply_markup=get_reply_keyboard())
         return
 
     try:
@@ -335,9 +338,12 @@ async def process_archive_year(message: types.Message, state: FSMContext):
             else:
                 text += f"{i+1}. {name} ({team}) — {points} очков\n"
                 
-        await tmp_msg.edit_text(text, parse_mode="Markdown")
-    except Exception:
-        await tmp_msg.edit_text("❌ Ошибка при форматировании архива. Возможно, данных за этот год нет.")
+        await tmp_msg.delete()
+        await message.answer(text, parse_mode="Markdown", reply_markup=get_reply_keyboard())
+    except Exception as e:
+        print(f"Archive process error: {e}")
+        await tmp_msg.delete()
+        await message.answer("❌ Ошибка при форматировании архива. Возможно, данных за этот год нет.", reply_markup=get_reply_keyboard())
 
 @dp.message(F.text == '⚙️ Настройки')
 async def settings_menu(message: types.Message):
