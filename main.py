@@ -302,7 +302,7 @@ async def back_to_info_menu(callback: types.CallbackQuery):
 @dp.message(F.text == '📜 Архив сезонов')
 async def archive_menu(message: types.Message, state: FSMContext):
     add_user(message.chat.id)
-    await message.answer("Введите год (с 1950 по текущий), чтобы получить исторические итоги сезона:", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("Введите год (с 1950 по текущий), чтобы получить итоги сезона (Топ-5 пилотов):", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(Archive.waiting_for_year)
 
 @dp.message(Archive.waiting_for_year)
@@ -313,56 +313,31 @@ async def process_archive_year(message: types.Message, state: FSMContext):
         return
         
     await state.clear()
-    tmp_msg = await message.answer(f"🔄 Извлекаю архивы за {year_str} год...\n_(Это займет пару секунд)_", reply_markup=get_reply_keyboard())
+    tmp_msg = await message.answer(f"🔄 Извлекаю топ-5 пилотов за {year_str} год...", reply_markup=get_reply_keyboard())
     
-    driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 1})
-    await asyncio.sleep(0.3)
-    team_data = await fetch_f1_data(f"{year_str}/constructorStandings", params={"limit": 1})
-    await asyncio.sleep(0.3)
-    races_data = await fetch_f1_data(f"{year_str}/results/1", params={"limit": 100})
-        
-    text = f"📜 *Итоги сезона {year_str}*\n\n"
+    driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 5})
     
-    if driver_data and 'MRData' in driver_data:
-        try:
-            champion = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][0]
-            champ_name = f"{champion['Driver']['givenName']} {champion['Driver']['familyName']}"
-            text += f"👑 *Чемпион мира:* {champ_name} ({champion['points']} очков)\n"
-        except Exception:
-            text += "👑 *Чемпион мира:* Данных нет\n"
-    else:
-        text += "👑 *Чемпион мира:* Ошибка API\n"
-            
-    if team_data and 'MRData' in team_data:
-        try:
-            team_champ = team_data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings'][0]
-            text += f"🏎 *Кубок конструкторов:* {team_champ['Constructor']['name']} ({team_champ['points']} очков)\n\n"
-        except Exception:
-            text += "🏎 *Кубок конструкторов:* Кубок не вручался в этом году\n\n"
-    else:
-        text += "🏎 *Кубок конструкторов:* Кубок не вручался в этом году\n\n"
-            
-    if races_data and 'MRData' in races_data:
-        try:
-            races = races_data['MRData']['RaceTable']['Races']
-            text += "*Победители Гран-при:*\n"
-            for r in races:
-                try:
-                    race_name = r['raceName'].replace(' Grand Prix', '')
-                    winner = r['Results'][0]['Driver']['familyName']
-                    text += f"🏁 {race_name}: {winner}\n"
-                except Exception:
-                    continue
-        except Exception:
-            text += "Нет данных по отдельным гонкам.\n"
-    else:
-        text += "Нет данных по гонкам.\n"
-            
+    if not driver_data or 'MRData' not in driver_data:
+        await tmp_msg.edit_text("❌ Сервер API недоступен или вернул ошибку. Попробуйте позже.")
+        return
+
     try:
+        standings = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
+        text = f"📜 *Итоги сезона {year_str} (Топ-5)*\n\n"
+        
+        for i, d in enumerate(standings):
+            name = f"{d['Driver']['givenName']} {d['Driver']['familyName']}"
+            team = d['Constructors'][0]['name'] if d.get('Constructors') else "Неизвестно"
+            points = d['points']
+            
+            if i == 0:
+                text += f"👑 *Чемпион:* {name} ({team}) — {points} очков\n\n*Остальные лидеры:*\n"
+            else:
+                text += f"{i+1}. {name} ({team}) — {points} очков\n"
+                
         await tmp_msg.edit_text(text, parse_mode="Markdown")
-    except Exception as e:
-        print(f"Ошибка вывода архива: {e}")
-        await tmp_msg.edit_text("❌ Произошла ошибка при форматировании текста архива.")
+    except Exception:
+        await tmp_msg.edit_text("❌ Ошибка при форматировании архива. Возможно, данных за этот год нет.")
 
 @dp.message(F.text == '⚙️ Настройки')
 async def settings_menu(message: types.Message):
