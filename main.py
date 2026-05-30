@@ -302,7 +302,7 @@ async def back_to_info_menu(callback: types.CallbackQuery):
 @dp.message(F.text == '📜 Архив сезонов')
 async def archive_menu(message: types.Message, state: FSMContext):
     add_user(message.chat.id)
-    await message.answer("Введите год (с 1950 по текущий), чтобы получить итоги сезона (Топ-5 пилотов):", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("Введите год (с 1950 по текущий), чтобы получить подробные итоги сезона:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(Archive.waiting_for_year)
 
 @dp.message(Archive.waiting_for_year)
@@ -314,36 +314,47 @@ async def process_archive_year(message: types.Message, state: FSMContext):
         
     await state.clear()
     
-    # Отправляем сообщение-заглушку БЕЗ клавиатуры, чтобы избежать ошибки "message can't be edited"
-    tmp_msg = await message.answer(f"🔄 Извлекаю топ-5 пилотов за {year_str} год...")
+    tmp_msg = await message.answer(f"🔄 Стягиваю подробные архивы за {year_str} год...")
     
-    driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 5})
+    driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 30})
+    await asyncio.sleep(0.2)
+    team_data = await fetch_f1_data(f"{year_str}/constructorStandings", params={"limit": 20})
     
     if not driver_data or 'MRData' not in driver_data:
         await tmp_msg.delete()
-        await message.answer("❌ Сервер API недоступен или вернул ошибку. Попробуйте позже.", reply_markup=get_reply_keyboard())
+        await message.answer("❌ Сервер API недоступен. Попробуйте позже.", reply_markup=get_reply_keyboard())
         return
 
     try:
-        standings = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
-        text = f"📜 *Итоги сезона {year_str} (Топ-5)*\n\n"
+        text = f"📜 *Итоги исторического сезона {year_str}*\n\n"
         
-        for i, d in enumerate(standings):
+        drivers_list = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
+        text += "🏆 *Личный зачет (Топ-10):*\n"
+        for d in drivers_list[:10]:
+            pos = d['position']
             name = f"{d['Driver']['givenName']} {d['Driver']['familyName']}"
-            team = d['Constructors'][0]['name'] if d.get('Constructors') else "Неизвестно"
-            points = d['points']
+            pts = d['points']
+            emoji = "👑 " if pos == "1" else f"{pos}. "
+            text += f"{emoji}{name} — {pts} очков\n"
             
-            if i == 0:
-                text += f"👑 *Чемпион:* {name} ({team}) — {points} очков\n\n*Остальные лидеры:*\n"
-            else:
-                text += f"{i+1}. {name} ({team}) — {points} очков\n"
-                
+        if team_data and 'MRData' in team_data and team_data['MRData']['StandingsTable']['StandingsLists']:
+            text += "\n🏎 *Кубок конструкторов (Топ-5):*\n"
+            teams_list = team_data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings']
+            for t in teams_list[:5]:
+                pos = t['position']
+                team_name = t['Constructor']['name']
+                pts = t['points']
+                emoji = "🥇 " if pos == "1" else f"{pos}. "
+                text += f"{emoji}{team_name} — {pts} очков\n"
+        else:
+            text += "\n🏎 *Кубок конструкторов:* Не вручался до 1958 года\n"
+            
         await tmp_msg.delete()
         await message.answer(text, parse_mode="Markdown", reply_markup=get_reply_keyboard())
     except Exception as e:
-        print(f"Archive process error: {e}")
+        print(f"Archive detail parsing error: {e}")
         await tmp_msg.delete()
-        await message.answer("❌ Ошибка при форматировании архива. Возможно, данных за этот год нет.", reply_markup=get_reply_keyboard())
+        await message.answer("❌ Ошибка обработки детальных архивных данных.", reply_markup=get_reply_keyboard())
 
 @dp.message(F.text == '⚙️ Настройки')
 async def settings_menu(message: types.Message):
