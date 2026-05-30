@@ -23,7 +23,6 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 API_URL = "https://api.jolpi.ca/ergast/f1"
-ARCHIVE_API_URL = "https://ergast.motornet.com/api/f1"
 DB_PATH = "f1_users.db"
 
 class Archive(StatesGroup):
@@ -50,22 +49,17 @@ def get_user_settings():
     with sqlite3.connect(DB_PATH) as conn:
         return [{"chat_id": row[0], "notify_time": row[1]} for row in conn.execute("SELECT chat_id, notify_time FROM users")]
 
-async def fetch_f1_data(endpoint: str, use_archive=False) -> dict:
-    base_url = ARCHIVE_API_URL if use_archive else API_URL
+async def fetch_f1_data(endpoint: str, params: dict = None) -> dict:
     try:
-        timeout = aiohttp.ClientTimeout(total=8)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{base_url}/{endpoint}.json") as response:
+        timeout = aiohttp.ClientTimeout(total=15)
+        headers = {"User-Agent": "F1TelegramBot/1.0"}
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(f"{API_URL}/{endpoint}.json", params=params) as response:
                 if response.status == 200:
                     return await response.json()
-                
-                # Фоллбэк: если архивное зеркало лежит, пробуем через основной API
-                if use_archive:
-                    async with session.get(f"{API_URL}/{endpoint}.json") as backup_resp:
-                        if backup_resp.status == 200:
-                            return await backup_resp.json()
                 return None
-    except Exception:
+    except Exception as e:
+        print(f"API Error ({endpoint}): {e}")
         return None
 
 def get_reply_keyboard():
@@ -106,7 +100,8 @@ def extract_all_sessions(race_data: dict) -> list:
 
 async def check_schedule_and_notify():
     data = await fetch_f1_data("current/next")
-    if not data: return
+    if not data:
+        return
 
     try:
         race = data['MRData']['RaceTable']['Races'][0]
@@ -117,30 +112,41 @@ async def check_schedule_and_notify():
         users = get_user_settings()
         
         for sess in sessions:
-            if not sess['date'] or not sess['time']: continue
+            if not sess['date'] or not sess['time']:
+                continue
                 
             dt_utc = datetime.strptime(f"{sess['date']} {sess['time']}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
             delta_minutes = (dt_utc - now_utc).total_seconds() / 60
             
             for user in users:
                 offset = user['notify_time']
-                if offset == 0: continue
+                if offset == 0:
+                    continue
                     
                 if offset - 5 < delta_minutes <= offset:
                     dt_moscow = dt_utc.astimezone(ZoneInfo("Europe/Moscow")).strftime("%H:%M")
-                    if offset == 1440: time_str = "ровно через 24 часа"
-                    elif offset >= 60: time_str = f"через {offset // 60} час(а)"
-                    else: time_str = f"через {offset} минут"
+                    
+                    if offset == 1440:
+                        time_str = "ровно через 24 часа"
+                    elif offset >= 60:
+                        time_str = f"через {offset // 60} час(а)"
+                    else:
+                        time_str = f"через {offset} минут"
                         
                     msg = f"🔔 *Напоминание!*\n\n{sess['name']} в рамках {race_name} начнется {time_str} (в {dt_moscow} по Мск)!"
-                    try: await bot.send_message(user['chat_id'], msg, parse_mode="Markdown")
-                    except Exception: pass
-    except Exception: pass
+                    
+                    try:
+                        await bot.send_message(user['chat_id'], msg, parse_mode="Markdown")
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     add_user(message.chat.id)
     user_name = message.from_user.first_name or "фанат автоспорта"
+    
     welcome_text = (
         f"Привет, {user_name}! 🏎💨\n\n"
         "Я — твой личный бот-помощник по Формуле-1.\n"
@@ -161,7 +167,7 @@ async def info_menu(message: types.Message):
 
 @dp.callback_query(F.data == 'info_drivers')
 async def list_all_drivers(callback: types.CallbackQuery):
-    data = await fetch_f1_data("current/driverStandings")
+    data = await fetch_f1_data("current/driverStandings", params={"limit": 100})
     if not data:
         await callback.message.edit_text("❌ Ошибка получения данных.")
         await callback.answer()
@@ -169,18 +175,24 @@ async def list_all_drivers(callback: types.CallbackQuery):
 
     try:
         standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
-        buttons, row = [], []
+        buttons = []
+        row = []
+        
         for d in standings:
             driver_id = d['Driver']['driverId']
             name = f"{d['Driver']['givenName']} {d['Driver']['familyName']}"
             row.append(InlineKeyboardButton(text=name, callback_data=f"profile_{driver_id}"))
+            
             if len(row) == 2:
                 buttons.append(row)
                 row = []
-        if row: buttons.append(row)
+                
+        if row:
+            buttons.append(row)
+            
         buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_info")])
-        
-        await callback.message.edit_text("Выберите пилота для просмотра профиля:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await callback.message.edit_text("Выберите пилота для просмотра профиля:", reply_markup=kb)
     except Exception:
         await callback.message.edit_text("🤷‍♂️ Не удалось загрузить список пилотов.")
     await callback.answer()
@@ -188,7 +200,7 @@ async def list_all_drivers(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith('profile_'))
 async def show_driver_profile(callback: types.CallbackQuery):
     driver_id = callback.data[8:]
-    data = await fetch_f1_data("current/driverStandings")
+    data = await fetch_f1_data("current/driverStandings", params={"limit": 100})
     
     if not data:
         await callback.message.edit_text("❌ Ошибка получения данных о пилоте.")
@@ -197,28 +209,47 @@ async def show_driver_profile(callback: types.CallbackQuery):
 
     try:
         standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
-        driver_info = next((d for d in standings if d.get('Driver', {}).get('driverId') == driver_id), None)
+        driver_info = None
+        
+        for d in standings:
+            if d.get('Driver', {}).get('driverId') == driver_id:
+                driver_info = d
+                break
+                
         if not driver_info:
             await callback.message.edit_text("🤷‍♂️ Пилот не найден.")
             return
             
         driver = driver_info.get('Driver', {})
         team = driver_info.get('Constructors', [{'name': 'N/A'}])[0].get('name', 'N/A')
+        
         name = f"{driver.get('givenName', '')} {driver.get('familyName', '')}".strip()
+        code = driver.get('code', 'N/A')
+        number = driver.get('permanentNumber', 'N/A')
+        dob = driver.get('dateOfBirth', 'N/A')
+        nationality = driver.get('nationality', 'N/A')
+        url = driver.get('url', '')
+        
+        pos = driver_info.get('position', 'N/A')
+        points = driver_info.get('points', '0')
         
         text = (
-            f"🏎 *Профиль: {name} ({driver.get('code', 'N/A')})*\n"
+            f"🏎 *Профиль: {name} ({code})*\n"
             f"🏎 Команда: {team}\n"
-            f"🔢 Номер болида: {driver.get('permanentNumber', 'N/A')}\n"
-            f"🌍 Нация: {driver.get('nationality', 'N/A')}\n"
-            f"📅 Дата рождения: {driver.get('dateOfBirth', 'N/A')}\n\n"
+            f"🔢 Номер болида: {number}\n"
+            f"🌍 Нация: {nationality}\n"
+            f"📅 Дата рождения: {dob}\n\n"
             f"📊 *Текущий сезон:*\n"
-            f"🏆 Позиция: {driver_info.get('position', 'N/A')}\n"
-            f"💯 Очков: {driver_info.get('points', '0')}\n\n"
-            f"🔗 [Википедия]({driver.get('url', '')})"
+            f"🏆 Позиция в чемпионате: {pos}\n"
+            f"💯 Очков: {points}\n\n"
+            f"🔗 [Страница в Википедии]({url})"
         )
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К списку пилотов", callback_data="info_drivers")]])
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К списку пилотов", callback_data="info_drivers")]
+        ])
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
+        
     except Exception:
         await callback.message.edit_text("🤷‍♂️ Ошибка при обработке профиля.")
     await callback.answer()
@@ -228,20 +259,32 @@ async def show_circuit_info(callback: types.CallbackQuery):
     data = await fetch_f1_data("current/next")
     if not data:
         await callback.message.edit_text("❌ Ошибка получения данных.")
-        return await callback.answer()
+        await callback.answer()
+        return
 
     try:
-        circuit = data['MRData']['RaceTable']['Races'][0].get('Circuit', {})
-        loc = circuit.get('Location', {})
+        race = data['MRData']['RaceTable']['Races'][0]
+        circuit = race.get('Circuit', {})
+        name = circuit.get('circuitName', 'N/A')
+        location = circuit.get('Location', {})
+        locality = location.get('locality', 'N/A')
+        country = location.get('country', 'N/A')
+        lat = location.get('lat', 'N/A')
+        lng = location.get('long', 'N/A')
+        url = circuit.get('url', '')
+        
         text = (
             f"📍 *Информация о текущей трассе*\n\n"
-            f"🏁 Название: {circuit.get('circuitName', 'N/A')}\n"
-            f"🏙 Город/Регион: {loc.get('locality', 'N/A')}\n"
-            f"🌍 Страна: {loc.get('country', 'N/A')}\n"
-            f"🌐 Координаты: {loc.get('lat', 'N/A')}, {loc.get('long', 'N/A')}\n\n"
-            f"🔗 [Википедия]({circuit.get('url', '')})"
+            f"🏁 Название: {name}\n"
+            f"🏙 Город/Регион: {locality}\n"
+            f"🌍 Страна: {country}\n"
+            f"🌐 Координаты: {lat}, {lng}\n\n"
+            f"🔗 [Подробнее в Википедии]({url})"
         )
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_info")]])
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_info")]
+        ])
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
     except Exception:
         await callback.message.edit_text("🤷‍♂️ Не удалось распарсить данные о трассе.")
@@ -266,49 +309,60 @@ async def archive_menu(message: types.Message, state: FSMContext):
 async def process_archive_year(message: types.Message, state: FSMContext):
     year_str = message.text.strip()
     if not year_str.isdigit() or not (1950 <= int(year_str) <= datetime.now().year):
-        await message.answer("❌ Введите корректный год (например, 2008).")
+        await message.answer("❌ Пожалуйста, введите корректный год (например, 2008).")
         return
         
     await state.clear()
-    tmp_msg = await message.answer(f"🔄 Извлекаю архивы за {year_str} год...", reply_markup=get_reply_keyboard())
+    tmp_msg = await message.answer(f"🔄 Извлекаю архивы за {year_str} год...\n_(Это займет пару секунд)_", reply_markup=get_reply_keyboard())
     
-    # Запрашиваем только топа-1, чтобы не грузить базу
-    driver_data = await fetch_f1_data(f"{year_str}/driverStandings/1", use_archive=True)
-    team_data = await fetch_f1_data(f"{year_str}/constructorStandings/1", use_archive=True)
-    races_data = await fetch_f1_data(f"{year_str}/results/1", use_archive=True)
+    driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 1})
+    await asyncio.sleep(0.3)
+    team_data = await fetch_f1_data(f"{year_str}/constructorStandings", params={"limit": 1})
+    await asyncio.sleep(0.3)
+    races_data = await fetch_f1_data(f"{year_str}/results/1", params={"limit": 100})
         
-    text = f"📜 <b>Итоги сезона {year_str}</b>\n\n"
+    text = f"📜 *Итоги сезона {year_str}*\n\n"
     
     if driver_data and 'MRData' in driver_data:
         try:
             champion = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][0]
             champ_name = f"{champion['Driver']['givenName']} {champion['Driver']['familyName']}"
-            text += f"👑 <b>Чемпион мира:</b> {champ_name} ({champion['points']} очков)\n"
-        except Exception: text += "👑 <b>Чемпион мира:</b> Данных нет\n"
-    else: text += "👑 <b>Чемпион мира:</b> Данных нет\n"
+            text += f"👑 *Чемпион мира:* {champ_name} ({champion['points']} очков)\n"
+        except Exception:
+            text += "👑 *Чемпион мира:* Данных нет\n"
+    else:
+        text += "👑 *Чемпион мира:* Ошибка API\n"
             
     if team_data and 'MRData' in team_data:
         try:
             team_champ = team_data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings'][0]
-            text += f"🏎 <b>Кубок конструкторов:</b> {team_champ['Constructor']['name']} ({team_champ['points']} очков)\n\n"
-        except Exception: text += "🏎 <b>Кубок конструкторов:</b> Кубок не вручался\n\n"
-    else: text += "🏎 <b>Кубок конструкторов:</b> Кубок не вручался\n\n"
+            text += f"🏎 *Кубок конструкторов:* {team_champ['Constructor']['name']} ({team_champ['points']} очков)\n\n"
+        except Exception:
+            text += "🏎 *Кубок конструкторов:* Кубок не вручался в этом году\n\n"
+    else:
+        text += "🏎 *Кубок конструкторов:* Кубок не вручался в этом году\n\n"
             
     if races_data and 'MRData' in races_data:
         try:
             races = races_data['MRData']['RaceTable']['Races']
-            text += "<b>Победители Гран-при:</b>\n"
+            text += "*Победители Гран-при:*\n"
             for r in races:
                 try:
                     race_name = r['raceName'].replace(' Grand Prix', '')
                     winner = r['Results'][0]['Driver']['familyName']
                     text += f"🏁 {race_name}: {winner}\n"
-                except Exception: continue
-        except Exception: text += "Нет данных по отдельным гонкам.\n"
-    else: text += "Нет данных по гонкам.\n"
+                except Exception:
+                    continue
+        except Exception:
+            text += "Нет данных по отдельным гонкам.\n"
+    else:
+        text += "Нет данных по гонкам.\n"
             
-    try: await tmp_msg.edit_text(text, parse_mode="HTML")
-    except Exception: await tmp_msg.edit_text("❌ Ошибка формирования текста.")
+    try:
+        await tmp_msg.edit_text(text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Ошибка вывода архива: {e}")
+        await tmp_msg.edit_text("❌ Произошла ошибка при форматировании текста архива.")
 
 @dp.message(F.text == '⚙️ Настройки')
 async def settings_menu(message: types.Message):
@@ -327,10 +381,14 @@ async def process_notify_setting(callback: types.CallbackQuery):
     minutes = int(callback.data.split('_')[1])
     update_notify_time(callback.message.chat.id, minutes)
     
-    if minutes == 0: text = "🔕 Уведомления полностью отключены."
-    elif minutes == 1440: text = "✅ Напоминания установлены: за 24 часа до старта."
-    elif minutes >= 60: text = f"✅ Напоминания установлены: за {minutes // 60} час(а) до старта."
-    else: text = f"✅ Напоминания установлены: за {minutes} минут до старта."
+    if minutes == 0:
+        text = "🔕 Уведомления полностью отключены."
+    elif minutes == 1440:
+        text = "✅ Напоминания установлены: за 24 часа до старта."
+    elif minutes >= 60:
+        text = f"✅ Напоминания установлены: за {minutes // 60} час(а) до старта."
+    else:
+        text = f"✅ Напоминания установлены: за {minutes} минут до старта."
         
     await callback.message.edit_text(text)
     await callback.answer()
@@ -340,73 +398,95 @@ async def process_next_race(message: types.Message):
     add_user(message.chat.id)
     tmp_msg = await message.answer("🔄 Загружаю расписание...")
     data = await fetch_f1_data("current/next")
-    if not data: return await tmp_msg.edit_text("❌ Ошибка получения данных.")
+    
+    if not data:
+        await tmp_msg.edit_text("❌ Ошибка получения данных от API.")
+        return
 
     try:
         race = data['MRData']['RaceTable']['Races'][0]
-        schedule_by_date = {}
+        race_name = race['raceName']
+        circuit = race['Circuit']['circuitName']
+        
+        sessions = extract_all_sessions(race)
+        
         ru_days = {0: 'Понедельник', 1: 'Вторник', 2: 'Среда', 3: 'Четверг', 4: 'Пятница', 5: 'Суббота', 6: 'Воскресенье'}
+        schedule_by_date = {}
         
-        for sess in extract_all_sessions(race):
+        for sess in sessions:
             if not sess['date'] or not sess['time']: continue
-            dt_local = datetime.strptime(f"{sess['date']} {sess['time']}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Moscow"))
+            dt_utc = datetime.strptime(f"{sess['date']} {sess['time']}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
+            dt_local = dt_utc.astimezone(ZoneInfo("Europe/Moscow"))
             date_key = f"{ru_days[dt_local.weekday()]}, {dt_local.strftime('%d.%m')}"
-            schedule_by_date.setdefault(date_key, []).append(f"{dt_local.strftime('%H:%M')} — {sess['name']}")
+            
+            if date_key not in schedule_by_date:
+                schedule_by_date[date_key] = []
+            schedule_by_date[date_key].append(f"{dt_local.strftime('%H:%M')} — {sess['name']}")
         
-        text = f"📅 *{race['raceName']}*\n📍 Трасса: {race['Circuit']['circuitName']}\n\n*Расписание (мск):*\n\n"
+        text = f"📅 *{race_name}*\n📍 Трасса: {circuit}\n\n*Расписание (время московское):*\n\n"
         for date_key, events in schedule_by_date.items():
-            text += f"*{date_key}:*\n" + "\n".join(events) + "\n\n"
-        await tmp_msg.edit_text(text, parse_mode="Markdown")
+            text += f"*{date_key}:*\n"
+            for event in events:
+                text += f"{event}\n"
+            text += "\n"
     except Exception:
-        await tmp_msg.edit_text("🤷‍♂️ Не удалось распарсить данные.")
+        text = "🤷‍♂️ Не удалось распарсить данные о следующей гонке."
+        
+    await tmp_msg.edit_text(text, parse_mode="Markdown")
 
 @dp.message(F.text == '🏁 Последняя гонка')
 async def process_last_race(message: types.Message):
     add_user(message.chat.id)
     tmp_msg = await message.answer("🔄 Загружаю результаты...")
     data = await fetch_f1_data("current/last/results")
-    if not data: return await tmp_msg.edit_text("🤷‍♂️ Ошибка получения результатов.")
-
-    try:
-        race = data['MRData']['RaceTable']['Races'][0]
-        text = f"🏁 *Итоги: {race['raceName']}*\n\n"
-        for res in race['Results'][:5]:
-            text += f"{res['position']}. {res['Driver']['familyName']} ({res['Constructor']['name']}) — {res['points']} очков\n"
-        await tmp_msg.edit_text(text, parse_mode="Markdown")
-    except Exception:
-        await tmp_msg.edit_text("🤷‍♂️ Ошибка парсинга.")
+    
+    if data:
+        try:
+            race = data['MRData']['RaceTable']['Races'][0]
+            text = f"🏁 *Итоги: {race['raceName']}*\n\n"
+            for res in race['Results'][:5]:
+                text += f"{res['position']}. {res['Driver']['familyName']} ({res['Constructor']['name']}) — {res['points']} очков\n"
+            await tmp_msg.edit_text(text, parse_mode="Markdown")
+            return
+        except KeyError:
+            pass
+    await tmp_msg.edit_text("🤷‍♂️ Ошибка получения результатов.")
 
 @dp.message(F.text == '🏆 Личный зачет')
 async def process_drivers(message: types.Message):
     add_user(message.chat.id)
     tmp_msg = await message.answer("🔄 Загружаю таблицу...")
-    data = await fetch_f1_data("current/driverStandings")
-    if not data: return await tmp_msg.edit_text("🤷‍♂️ Данные пока недоступны.")
-
-    try:
-        standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings'][:10]
-        text = "🏆 *Личный зачет (Топ-10):*\n\n"
-        for d in standings:
-            text += f"{d['position']}. {d['Driver']['familyName']} — {d['points']} очков\n"
-        await tmp_msg.edit_text(text, parse_mode="Markdown")
-    except Exception:
-        await tmp_msg.edit_text("🤷‍♂️ Данные пока недоступны.")
+    data = await fetch_f1_data("current/driverStandings", params={"limit": 10})
+    
+    if data:
+        try:
+            standings = data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
+            text = "🏆 *Личный зачет (Топ-10):*\n\n"
+            for driver in standings:
+                text += f"{driver['position']}. {driver['Driver']['familyName']} — {driver['points']} очков\n"
+            await tmp_msg.edit_text(text, parse_mode="Markdown")
+            return
+        except KeyError:
+            pass
+    await tmp_msg.edit_text("🤷‍♂️ Данные пока недоступны.")
 
 @dp.message(F.text == '🏎 Кубок конструкторов')
 async def process_teams(message: types.Message):
     add_user(message.chat.id)
     tmp_msg = await message.answer("🔄 Загружаю Кубок...")
     data = await fetch_f1_data("current/constructorStandings")
-    if not data: return await tmp_msg.edit_text("🤷‍♂️ Данные пока недоступны.")
-
-    try:
-        standings = data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings']
-        text = "🏎 *Кубок конструкторов:*\n\n"
-        for t in standings:
-            text += f"{t['position']}. {t['Constructor']['name']} — {t['points']} очков\n"
-        await tmp_msg.edit_text(text, parse_mode="Markdown")
-    except Exception:
-        await tmp_msg.edit_text("🤷‍♂️ Данные пока недоступны.")
+    
+    if data:
+        try:
+            standings = data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings']
+            text = "🏎 *Кубок конструкторов:*\n\n"
+            for team in standings:
+                text += f"{team['position']}. {team['Constructor']['name']} — {team['points']} очков\n"
+            await tmp_msg.edit_text(text, parse_mode="Markdown")
+            return
+        except KeyError:
+            pass
+    await tmp_msg.edit_text("🤷‍♂️ Данные пока недоступны.")
 
 @dp.message(F.text == '📊 Сравнение телеметрии')
 async def process_telemetry(message: types.Message):
@@ -415,9 +495,11 @@ async def process_telemetry(message: types.Message):
 
 async def main():
     init_db()
+    
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_schedule_and_notify, 'interval', minutes=5)
     scheduler.start()
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
