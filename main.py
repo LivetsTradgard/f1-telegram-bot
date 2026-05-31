@@ -545,7 +545,7 @@ async def process_last_pits(callback: types.CallbackQuery):
         valid_pits = [p for p in pits if ':' not in p['duration']]
         sorted_pits = sorted(valid_pits, key=lambda x: float(x['duration']))[:5]
         
-        text = "⏱ *Топ-5 быстрых пит-стопов:*\n\n"
+        text = "⏱ *Топ-5 быстрых проездов по пит-лейну:*\n_(общее время от заезда до выезда)_\n\n"
         for i, p in enumerate(sorted_pits):
             driver = p['driverId'].replace('_', ' ').title()
             text += f"{i+1}. {driver} — {p['duration']} сек (Круг {p['lap']})\n"
