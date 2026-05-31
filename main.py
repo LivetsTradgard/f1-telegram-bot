@@ -42,6 +42,11 @@ def init_db():
         except sqlite3.OperationalError:
             pass
             
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN name TEXT DEFAULT 'Гонщик'")
+        except sqlite3.OperationalError:
+            pass
+            
         c.execute("""CREATE TABLE IF NOT EXISTS predictions (
             chat_id INTEGER,
             race_id TEXT,
@@ -51,10 +56,17 @@ def init_db():
             scored INTEGER DEFAULT 0,
             PRIMARY KEY (chat_id, race_id)
         )""")
+        
+        try:
+            c.execute("ALTER TABLE predictions ADD COLUMN accuracy INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
 
-def add_user(chat_id):
+def add_user(chat_id, name=None):
+    user_name = name or "Гонщик"
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("INSERT OR IGNORE INTO users (chat_id, notify_time) VALUES (?, 60)", (chat_id,))
+        conn.execute("INSERT OR IGNORE INTO users (chat_id, notify_time, name) VALUES (?, 60, ?)", (chat_id, user_name))
+        conn.execute("UPDATE users SET name = ? WHERE chat_id = ?", (user_name, chat_id))
 
 def update_notify_time(chat_id, minutes):
     with sqlite3.connect(DB_PATH) as conn:
@@ -82,7 +94,8 @@ def get_reply_keyboard():
         [KeyboardButton(text="📅 Ближайший этап"), KeyboardButton(text="🏁 Последняя гонка")],
         [KeyboardButton(text="🏆 Личный зачет"), KeyboardButton(text="🏎 Кубок конструкторов")],
         [KeyboardButton(text="🔎 Инфо и Профили"), KeyboardButton(text="📜 Архив сезонов")],
-        [KeyboardButton(text="🔮 Прогнозы на подиум"), KeyboardButton(text="⚙️ Настройки")]
+        [KeyboardButton(text="🔮 Прогнозы на подиум"), KeyboardButton(text="📊 Рейтинг игроков")],
+        [KeyboardButton(text="⏱ Live-тайминг"), KeyboardButton(text="⚙️ Настройки")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -217,13 +230,13 @@ async def check_race_results():
                     pass
                 
                 # прогноз уже был
-                conn.execute("UPDATE predictions SET scored = 1 WHERE chat_id = ? AND race_id = ?", (chat_id, race_id))
+                conn.execute("UPDATE predictions SET scored = 1, accuracy = ? WHERE chat_id = ? AND race_id = ?", (percent, chat_id, race_id))
     except Exception as e:
         print(f"Results scoring error: {e}")
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     user_name = message.from_user.first_name or "фанат автоспорта"
     welcome_text = (f"Привет, {user_name}! 🏎💨\n\nЯ — твой личный бот-помощник по Формуле-1.\n"
                     f"Используй кнопки внизу для навигации!")
@@ -244,7 +257,7 @@ def generate_drivers_kb(drivers_list: list, exclude: list = None) -> InlineKeybo
 
 @dp.message(F.text == '🔮 Прогнозы на подиум')
 async def start_prediction(message: types.Message, state: FSMContext):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     tmp_msg = await message.answer("🔄 Загружаю данные следующей гонки...")
     
     next_race_data = await fetch_f1_data("current/next")
@@ -312,7 +325,7 @@ async def process_prediction_step(callback: types.CallbackQuery, state: FSMConte
         p1, p2, p3 = selected[0], selected[1], selected[2]
         
         with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT OR REPLACE INTO predictions (chat_id, race_id, p1, p2, p3, scored) VALUES (?, ?, ?, ?, ?, 0)", 
+            conn.execute("INSERT OR REPLACE INTO predictions (chat_id, race_id, p1, p2, p3, scored, accuracy) VALUES (?, ?, ?, ?, ?, 0, 0)", 
                          (callback.message.chat.id, race_id, p1, p2, p3))
             
         await state.clear()
@@ -325,9 +338,43 @@ async def process_prediction_step(callback: types.CallbackQuery, state: FSMConte
         
     await callback.answer()
 
+@dp.message(F.text == '📊 Рейтинг игроков')
+async def process_leaderboard(message: types.Message):
+    add_user(message.chat.id, message.from_user.first_name)
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        data = c.execute("""
+            SELECT u.name, AVG(p.accuracy), COUNT(p.race_id)
+            FROM predictions p
+            JOIN users u ON p.chat_id = u.chat_id
+            WHERE p.scored = 1
+            GROUP BY p.chat_id
+            ORDER BY AVG(p.accuracy) DESC, COUNT(p.race_id) DESC
+            LIMIT 10
+        """).fetchall()
+        
+    if not data:
+        return await message.answer("📊 *Рейтинг пока пуст.*\nДождитесь расчета первых прогнозов после гонки!", parse_mode="Markdown")
+        
+    text = "📊 *Глобальный рейтинг интуиции (Топ-10):*\n\n"
+    for i, (name, avg_acc, count) in enumerate(data):
+        medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
+        text += f"{medal} {name} — {int(avg_acc)}% (прогнозов: {count})\n"
+        
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(F.text == '⏱ Live-тайминг')
+async def process_live_timing(message: types.Message):
+    add_user(message.chat.id, message.from_user.first_name)
+    text = ("⏱ *Текстовый Live-тайминг*\n\n"
+            "📡 Модуль подключается к серверам трансляции...\n\n"
+            "_(Примечание: Прямо сейчас активных сессий нет или бесплатное API задерживает данные. "
+            "Обычно телеметрия обновляется через некоторое время после клетчатого флага)_")
+    await message.answer(text, parse_mode="Markdown")
+
 @dp.message(F.text == '🔎 Инфо и Профили')
 async def info_menu(message: types.Message):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏎 Профили всех пилотов", callback_data="info_drivers")],
         [InlineKeyboardButton(text="📍 Инфо о текущей трассе", callback_data="info_circuit")]
@@ -397,7 +444,7 @@ async def back_to_info_menu(callback: types.CallbackQuery):
 
 @dp.message(F.text == '📜 Архив сезонов')
 async def archive_menu(message: types.Message, state: FSMContext):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     await message.answer("Введите год (с 1950 по текущий), чтобы получить итоги сезона (Топ-5 пилотов):", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(Archive.waiting_for_year)
 
@@ -431,7 +478,7 @@ async def process_archive_year(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == '⚙️ Настройки')
 async def settings_menu(message: types.Message):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="За 30 минут", callback_data="notify_30"),
          InlineKeyboardButton(text="За 1 час", callback_data="notify_60")],
@@ -451,7 +498,7 @@ async def process_notify_setting(callback: types.CallbackQuery):
 
 @dp.message(F.text == '📅 Ближайший этап')
 async def process_next_race(message: types.Message):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     tmp_msg = await message.answer("🔄 Загружаю расписание...")
     data = await fetch_f1_data("current/next")
     if not data: return await tmp_msg.edit_text("❌ Ошибка.")
@@ -471,7 +518,7 @@ async def process_next_race(message: types.Message):
 
 @dp.message(F.text == '🏁 Последняя гонка')
 async def process_last_race(message: types.Message):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     tmp_msg = await message.answer("🔄 Загружаю результаты...")
     data = await fetch_f1_data("current/last/results")
     if not data: return await tmp_msg.edit_text("🤷‍♂️ Ошибка.")
@@ -480,12 +527,75 @@ async def process_last_race(message: types.Message):
         text = f"🏁 *Итоги: {race['raceName']}*\n\n"
         for res in race['Results'][:5]:
             text += f"{res['position']}. {res['Driver']['familyName']} ({res['Constructor']['name']}) — {res['points']} очков\n"
-        await tmp_msg.edit_text(text, parse_mode="Markdown")
+            
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏱ Пит-стопы", callback_data="last_race_pits"),
+             InlineKeyboardButton(text="❌ Сходы", callback_data="last_race_dnfs")]
+        ])
+        await tmp_msg.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     except: await tmp_msg.edit_text("🤷‍♂️ Ошибка парсинга.")
+
+@dp.callback_query(F.data == 'last_race_pits')
+async def process_last_pits(callback: types.CallbackQuery):
+    data = await fetch_f1_data("current/last/pitstops", params={"limit": 100})
+    if not data:
+        return await callback.answer("Данные недоступны", show_alert=True)
+    try:
+        pits = data['MRData']['RaceTable']['Races'][0]['PitStops']
+        valid_pits = [p for p in pits if ':' not in p['duration']]
+        sorted_pits = sorted(valid_pits, key=lambda x: float(x['duration']))[:5]
+        
+        text = "⏱ *Топ-5 быстрых пит-стопов:*\n\n"
+        for i, p in enumerate(sorted_pits):
+            driver = p['driverId'].replace('_', ' ').title()
+            text += f"{i+1}. {driver} — {p['duration']} сек (Круг {p['lap']})\n"
+            
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К результатам гонки", callback_data="last_race_back")]])
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        await callback.answer("Ошибка парсинга пит-стопов.", show_alert=True)
+
+@dp.callback_query(F.data == 'last_race_dnfs')
+async def process_last_dnfs(callback: types.CallbackQuery):
+    data = await fetch_f1_data("current/last/results", params={"limit": 100})
+    if not data:
+        return await callback.answer("Данные недоступны", show_alert=True)
+    try:
+        results = data['MRData']['RaceTable']['Races'][0]['Results']
+        dnfs = [r for r in results if r['status'] not in ['Finished'] and not r['status'].startswith('+')]
+        
+        if not dnfs:
+            text = "❌ *Сходов нет!* Все болиды добрались до финиша."
+        else:
+            text = "❌ *Сходы в гонке:*\n\n"
+            for d in dnfs:
+                text += f"• {d['Driver']['familyName']} ({d['Constructor']['name']}) — {d['status']}\n"
+                
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К результатам гонки", callback_data="last_race_back")]])
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except Exception:
+        await callback.answer("Ошибка парсинга сходов.", show_alert=True)
+
+@dp.callback_query(F.data == 'last_race_back')
+async def process_last_race_back(callback: types.CallbackQuery):
+    data = await fetch_f1_data("current/last/results")
+    if not data: return await callback.answer("Ошибка")
+    try:
+        race = data['MRData']['RaceTable']['Races'][0]
+        text = f"🏁 *Итоги: {race['raceName']}*\n\n"
+        for res in race['Results'][:5]:
+            text += f"{res['position']}. {res['Driver']['familyName']} ({res['Constructor']['name']}) — {res['points']} очков\n"
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏱ Пит-стопы", callback_data="last_race_pits"),
+             InlineKeyboardButton(text="❌ Сходы", callback_data="last_race_dnfs")]
+        ])
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except: pass
 
 @dp.message(F.text == '🏆 Личный зачет')
 async def process_drivers(message: types.Message):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     tmp_msg = await message.answer("🔄 Загружаю...")
     data = await fetch_f1_data("current/driverStandings", params={"limit": 10})
     if not data: return await tmp_msg.edit_text("🤷‍♂️ Ошибка.")
@@ -498,7 +608,7 @@ async def process_drivers(message: types.Message):
 
 @dp.message(F.text == '🏎 Кубок конструкторов')
 async def process_teams(message: types.Message):
-    add_user(message.chat.id)
+    add_user(message.chat.id, message.from_user.first_name)
     tmp_msg = await message.answer("🔄 Загружаю...")
     data = await fetch_f1_data("current/constructorStandings")
     if not data: return await tmp_msg.edit_text("🤷‍♂️ Ошибка.")
