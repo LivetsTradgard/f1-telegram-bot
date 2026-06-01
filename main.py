@@ -103,6 +103,51 @@ async def fetch_f1_data(endpoint: str, params: dict = None) -> dict:
         print(f"API Error ({endpoint}): {e}")
         return None
 
+# --- НОВЫЙ БЛОК: Запрос погоды ---
+def get_weather_emoji(code):
+    if code in [0, 1]: return "☀️" # Ясно
+    if code in [2, 3]: return "☁️" # Облачность
+    if code in [45, 48]: return "🌫" # Туман
+    if code in [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82]: return "🌧" # Дождь
+    if code in [95, 96, 99]: return "⛈" # Гроза
+    return "🌡"
+
+async def fetch_weather(lat: float, lon: float, target_date_str: str = None) -> dict:
+    url = "https://api.open-meteo.com/v1/forecast"
+    try:
+        if not target_date_str:
+            # Текущая погода
+            params = {"latitude": lat, "longitude": lon, "current_weather": "true"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("current_weather")
+        else:
+            # Прогноз на конкретный день
+            params = {
+                "latitude": lat, "longitude": lon,
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
+                "timezone": "auto",
+                "start_date": target_date_str,
+                "end_date": target_date_str
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if "daily" in data and len(data["daily"]["time"]) > 0:
+                            return {
+                                "t_max": data["daily"]["temperature_2m_max"][0],
+                                "t_min": data["daily"]["temperature_2m_min"][0],
+                                "rain": data["daily"]["precipitation_sum"][0],
+                                "code": data["daily"]["weathercode"][0]
+                            }
+    except Exception as e:
+        print(f"Weather fetch error: {e}")
+    return None
+# ----------------------------------
+
 def get_reply_keyboard():
     keyboard = [
         [KeyboardButton(text="📅 Ближайший этап"), KeyboardButton(text="🏁 Последняя гонка")],
@@ -159,7 +204,6 @@ async def check_schedule_and_notify():
             dt_utc = datetime.strptime(f"{sess['date']} {sess['time']}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
             delta_minutes = (dt_utc - now_utc).total_seconds() / 60
             
-        
             if sess['name'] == '🏁 Главная гонка' and 1435 < delta_minutes <= 1440:
                 for user in users:
                     msg = (f"⏳ До старта {race_name} остались ровно сутки!\n\n"
@@ -169,7 +213,6 @@ async def check_schedule_and_notify():
                         await bot.send_message(user['chat_id'], msg)
                     except:
                         pass
-
         
             for user in users:
                 offset = user['notify_time']
@@ -215,17 +258,15 @@ async def check_race_results():
                 pred_podium = [p1, p2, p3]
                 score = 0.0
                 
-                # точность
                 for i in range(3):
                     if pred_podium[i] == actual_podium[i]:
-                        score += 33.34  # найс в 10 попал
+                        score += 33.34
                     elif pred_podium[i] in actual_podium:
-                        score += 16.67  # ай скосил бывает
+                        score += 16.67
                         
                 percent = round(score)
                 if percent >= 99: percent = 100
                 
-                # Начисляем опыт: 10 базы + (точность * 2)
                 earned_xp = 10 + int(percent * 2)
                 
                 p1_name = driver_names.get(p1, p1)
@@ -247,7 +288,6 @@ async def check_race_results():
                 except:
                     pass
                 
-                # Обновляем таблицы
                 conn.execute("UPDATE predictions SET scored = 1, accuracy = ? WHERE chat_id = ? AND race_id = ?", (percent, chat_id, race_id))
                 conn.execute("UPDATE users SET xp = xp + ? WHERE chat_id = ?", (earned_xp, chat_id))
     except Exception as e:
@@ -362,7 +402,6 @@ async def process_leaderboard(message: types.Message):
     add_user(message.chat.id, message.from_user.first_name)
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
-        # Теперь сортируем по заработанному опыту (xp)
         data = c.execute("""
             SELECT u.name, u.xp, AVG(p.accuracy), COUNT(p.race_id)
             FROM users u
@@ -394,13 +433,10 @@ async def process_my_profile(message: types.Message):
         user_data = c.execute("SELECT name, xp FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
         user_name, xp = user_data[0], user_data[1]
         
-        # Получаем статистику по прогнозам
         stats = c.execute("SELECT AVG(accuracy), COUNT(race_id) FROM predictions WHERE chat_id = ? AND scored = 1", (chat_id,)).fetchone()
         
-        # Считаем место в рейтинге на основе XP
         rank_query = c.execute("SELECT COUNT(*) FROM users WHERE xp > (SELECT xp FROM users WHERE chat_id = ?)", (chat_id,)).fetchone()[0]
         place = rank_query + 1 
-        
         total_players = c.execute("SELECT COUNT(*) FROM users WHERE xp > 0").fetchone()[0]
 
     rank_name, next_xp = get_rank_info(xp)
@@ -480,11 +516,26 @@ async def show_circuit_info(callback: types.CallbackQuery):
     try:
         circuit = data['MRData']['RaceTable']['Races'][0].get('Circuit', {})
         loc = circuit.get('Location', {})
+        lat, lon = loc.get('lat'), loc.get('long')
+        
         text = (f"📍 *{circuit.get('circuitName', '')}*\n🏙 Город: {loc.get('locality', '')}\n"
-                f"🌍 Страна: {loc.get('country', '')}\n🔗 [Википедия]({circuit.get('url', '')})")
+                f"🌍 Страна: {loc.get('country', '')}\n"
+                f"📌 Координаты: `{lat}, {lon}`\n")
+        
+        # Запрашиваем текущую погоду по координатам
+        if lat and lon:
+            weather = await fetch_weather(float(lat), float(lon))
+            if weather:
+                emoji = get_weather_emoji(weather.get('weathercode', -1))
+                text += f"\n🌤 *Текущая погода на треке:*\n{emoji} {weather.get('temperature', '?')}°C (Ветер: {weather.get('windspeed', '?')} км/ч)\n"
+
+        text += f"\n🔗 [Читать в Википедии]({circuit.get('url', '')})"
+        
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_info")]])
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
-    except: pass
+    except Exception as e: 
+        print(e)
+        pass
     await callback.answer()
 
 @dp.callback_query(F.data == 'back_to_info')
@@ -499,7 +550,7 @@ async def back_to_info_menu(callback: types.CallbackQuery):
 @dp.message(F.text == '📜 Архив сезонов')
 async def archive_menu(message: types.Message, state: FSMContext):
     add_user(message.chat.id, message.from_user.first_name)
-    await message.answer("Введите год (с 1950 по текущий), чтобы получить итоги сезона (Топ-5 пилотов):", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("Введите год (с 1950 по текущий), чтобы получить подробные итоги сезона:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(Archive.waiting_for_year)
 
 @dp.message(Archive.waiting_for_year)
@@ -508,22 +559,43 @@ async def process_archive_year(message: types.Message, state: FSMContext):
     if not year_str.isdigit() or not (1950 <= int(year_str) <= datetime.now().year):
         return await message.answer("❌ Пожалуйста, введите корректный год.")
     await state.clear()
-    tmp_msg = await message.answer(f"🔄 Извлекаю топ-5 пилотов за {year_str} год...")
-    driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 5})
+    
+    tmp_msg = await message.answer(f"🔄 Поднимаю архивы за {year_str} год...")
+    
+    # Теперь парсим Топ-10 пилотов
+    driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 10})
+    # И Топ-3 конструкторов (Кубок существует только с 1958 года)
+    team_data = await fetch_f1_data(f"{year_str}/constructorStandings", params={"limit": 3}) if int(year_str) >= 1958 else None
     
     if not driver_data or 'MRData' not in driver_data:
         await tmp_msg.delete()
         return await message.answer("❌ Ошибка сервера.", reply_markup=get_reply_keyboard())
 
     try:
+        text = f"📜 *Итоги сезона {year_str}*\n\n"
+        
+        # Блок команд
+        if team_data and team_data['MRData']['StandingsTable']['StandingsLists']:
+            teams = team_data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings']
+            text += "🏎 *Кубок конструкторов (Топ-3):*\n"
+            for i, t in enumerate(teams):
+                text += f"{i+1}. {t['Constructor']['name']} — {t['points']} очков\n"
+            text += "\n"
+        elif int(year_str) < 1958:
+            text += "🏎 _Кубок конструкторов в этот год еще не разыгрывался_\n\n"
+
+        # Блок пилотов
         standings = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
-        text = f"📜 *Итоги сезона {year_str} (Топ-5)*\n\n"
+        text += "🏆 *Личный зачет (Топ-10):*\n"
         for i, d in enumerate(standings):
             name = f"{d['Driver']['givenName']} {d['Driver']['familyName']}"
             team = d['Constructors'][0]['name'] if d.get('Constructors') else "Неизвестно"
             pts = d['points']
-            if i == 0: text += f"👑 *Чемпион:* {name} ({team}) — {pts} очков\n\n*Остальные лидеры:*\n"
-            else: text += f"{i+1}. {name} ({team}) — {pts} очков\n"
+            if i == 0: 
+                text += f"👑 *Чемпион:* {name} ({team}) — {pts} очков\n"
+            else: 
+                text += f"{i+1}. {name} ({team}) — {pts} очков\n"
+                
         await tmp_msg.delete()
         await message.answer(text, parse_mode="Markdown", reply_markup=get_reply_keyboard())
     except Exception:
@@ -558,17 +630,47 @@ async def process_next_race(message: types.Message):
     if not data: return await tmp_msg.edit_text("❌ Ошибка.")
     try:
         race = data['MRData']['RaceTable']['Races'][0]
+        circuit = race.get('Circuit', {})
+        loc = circuit.get('Location', {})
+        lat, lon = loc.get('lat'), loc.get('long')
+        
         schedule_by_date, ru_days = {}, {0: 'Пн', 1: 'Вт', 2: 'Ср', 3: 'Чт', 4: 'Пт', 5: 'Сб', 6: 'Вс'}
+        
+        main_race_date_str = None
+        main_race_dt = None
+        
         for sess in extract_all_sessions(race):
             if not sess['date'] or not sess['time']: continue
             dt = datetime.strptime(f"{sess['date']} {sess['time']}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Moscow"))
             date_key = f"{ru_days[dt.weekday()]}, {dt.strftime('%d.%m')}"
             schedule_by_date.setdefault(date_key, []).append(f"{dt.strftime('%H:%M')} — {sess['name']}")
+            
+            if sess['name'] == '🏁 Главная гонка':
+                main_race_date_str = sess['date']
+                main_race_dt = dt
         
-        text = f"📅 *{race['raceName']}*\n\n"
-        for date_key, events in schedule_by_date.items(): text += f"*{date_key}:*\n" + "\n".join(events) + "\n\n"
+        text = f"📅 *{race['raceName']}* ({loc.get('country', '')})\n\n"
+        for date_key, events in schedule_by_date.items(): 
+            text += f"*{date_key}:*\n" + "\n".join(events) + "\n\n"
+            
+        # Логика прогноза погоды
+        if main_race_date_str and lat and lon and main_race_dt:
+            days_until = (main_race_dt.date() - datetime.now(ZoneInfo("Europe/Moscow")).date()).days
+            # Если до гонки 3 дня или меньше — показываем прогноз
+            if 0 <= days_until <= 3:
+                forecast = await fetch_weather(float(lat), float(lon), target_date_str=main_race_date_str)
+                if forecast:
+                    emoji = get_weather_emoji(forecast.get('code', -1))
+                    text += (f"🌤 *Прогноз погоды на день гонки:*\n"
+                             f"{emoji} От {forecast.get('t_min', '?')}°C до {forecast.get('t_max', '?')}°C\n"
+                             f"🌧 Осадки: {forecast.get('rain', '?')} мм")
+            elif days_until > 3:
+                text += f"_Прогноз погоды будет доступен за 3 дня до гонки._"
+
         await tmp_msg.edit_text(text, parse_mode="Markdown")
-    except: await tmp_msg.edit_text("🤷‍♂️ Ошибка парсинга.")
+    except Exception as e: 
+        print(e)
+        await tmp_msg.edit_text("🤷‍♂️ Ошибка парсинга.")
 
 @dp.message(F.text == '🏁 Последняя гонка')
 async def process_last_race(message: types.Message):
