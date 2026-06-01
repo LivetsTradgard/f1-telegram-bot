@@ -33,6 +33,15 @@ class Predict(StatesGroup):
     waiting_p2 = State()
     waiting_p3 = State()
 
+def get_rank_info(xp):
+    """Возвращает кортеж (Название ранга, XP для следующего ранга)"""
+    if xp < 200: return ("🏎 Новичок картинга", 200)
+    elif xp < 500: return ("🥉 Пилот Формулы-3", 500)
+    elif xp < 1000: return ("🥈 Пилот Формулы-2", 1000)
+    elif xp < 2000: return ("🥇 Боевой пилот Ф1", 2000)
+    elif xp < 3000: return ("🏆 Претендент на титул", 3000)
+    else: return ("👑 Гроссмейстер пит-уолла", None)
+
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -44,6 +53,11 @@ def init_db():
             
         try:
             c.execute("ALTER TABLE users ADD COLUMN name TEXT DEFAULT 'Гонщик'")
+        except sqlite3.OperationalError:
+            pass
+            
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN xp INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
             
@@ -65,7 +79,7 @@ def init_db():
 def add_user(chat_id, name=None):
     user_name = name or "Гонщик"
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("INSERT OR IGNORE INTO users (chat_id, notify_time, name) VALUES (?, 60, ?)", (chat_id, user_name))
+        conn.execute("INSERT OR IGNORE INTO users (chat_id, notify_time, name, xp) VALUES (?, 60, ?, 0)", (chat_id, user_name))
         conn.execute("UPDATE users SET name = ? WHERE chat_id = ?", (user_name, chat_id))
 
 def update_notify_time(chat_id, minutes):
@@ -95,7 +109,7 @@ def get_reply_keyboard():
         [KeyboardButton(text="🏆 Личный зачет"), KeyboardButton(text="🏎 Кубок конструкторов")],
         [KeyboardButton(text="🔎 Инфо и Профили"), KeyboardButton(text="📜 Архив сезонов")],
         [KeyboardButton(text="🔮 Прогнозы на подиум"), KeyboardButton(text="📊 Рейтинг игроков")],
-        [KeyboardButton(text="⏱ Live-тайминг"), KeyboardButton(text="⚙️ Настройки")]
+        [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="⚙️ Настройки")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -211,6 +225,9 @@ async def check_race_results():
                 percent = round(score)
                 if percent >= 99: percent = 100
                 
+                # Начисляем опыт: 10 базы + (точность * 2)
+                earned_xp = 10 + int(percent * 2)
+                
                 p1_name = driver_names.get(p1, p1)
                 p2_name = driver_names.get(p2, p2)
                 p3_name = driver_names.get(p3, p3)
@@ -222,15 +239,17 @@ async def check_race_results():
                        f"3. {driver_names[actual_podium[2]]}\n\n"
                        f"🔮 *Твой прогноз:*\n"
                        f"1. {p1_name}\n2. {p2_name}\n3. {p3_name}\n\n"
-                       f"🎯 *Точность твоего прогноза: {percent}%*")
+                       f"🎯 *Точность твоего прогноза: {percent}%*\n"
+                       f"✨ *Получено опыта:* +{earned_xp} XP")
                 
                 try:
                     await bot.send_message(chat_id, msg, parse_mode="Markdown")
                 except:
                     pass
                 
-                # прогноз уже был
+                # Обновляем таблицы
                 conn.execute("UPDATE predictions SET scored = 1, accuracy = ? WHERE chat_id = ? AND race_id = ?", (percent, chat_id, race_id))
+                conn.execute("UPDATE users SET xp = xp + ? WHERE chat_id = ?", (earned_xp, chat_id))
     except Exception as e:
         print(f"Results scoring error: {e}")
 
@@ -333,7 +352,7 @@ async def process_prediction_step(callback: types.CallbackQuery, state: FSMConte
         names = {d['id']: d['name'] for d in drivers_list}
         text = (f"✅ **Прогноз успешно сохранен!**\n\n"
                 f"1. {names.get(p1, p1)}\n2. {names.get(p2, p2)}\n3. {names.get(p3, p3)}\n\n"
-                f"Бот пришлет результаты и начислит % точности сразу после гонки!")
+                f"Бот пришлет результаты и начислит % точности и XP сразу после гонки!")
         await callback.message.edit_text(text, parse_mode="Markdown")
         
     await callback.answer()
@@ -343,33 +362,68 @@ async def process_leaderboard(message: types.Message):
     add_user(message.chat.id, message.from_user.first_name)
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
+        # Теперь сортируем по заработанному опыту (xp)
         data = c.execute("""
-            SELECT u.name, AVG(p.accuracy), COUNT(p.race_id)
-            FROM predictions p
-            JOIN users u ON p.chat_id = u.chat_id
+            SELECT u.name, u.xp, AVG(p.accuracy), COUNT(p.race_id)
+            FROM users u
+            JOIN predictions p ON u.chat_id = p.chat_id
             WHERE p.scored = 1
-            GROUP BY p.chat_id
-            ORDER BY AVG(p.accuracy) DESC, COUNT(p.race_id) DESC
+            GROUP BY u.chat_id
+            ORDER BY u.xp DESC, AVG(p.accuracy) DESC
             LIMIT 10
         """).fetchall()
         
     if not data:
         return await message.answer("📊 *Рейтинг пока пуст.*\nДождитесь расчета первых прогнозов после гонки!", parse_mode="Markdown")
         
-    text = "📊 *Глобальный рейтинг интуиции (Топ-10):*\n\n"
-    for i, (name, avg_acc, count) in enumerate(data):
+    text = "📊 *Глобальный рейтинг (Топ-10):*\n\n"
+    for i, (name, xp, avg_acc, count) in enumerate(data):
         medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
-        text += f"{medal} {name} — {int(avg_acc)}% (прогнозов: {count})\n"
+        rank_name, _ = get_rank_info(xp)
+        text += f"{medal} *{name}* — {xp} XP\n_{rank_name}_ | Точность: {int(avg_acc)}% | Прогнозов: {count}\n\n"
         
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message(F.text == '⏱ Live-тайминг')
-async def process_live_timing(message: types.Message):
+@dp.message(F.text == '👤 Мой профиль')
+async def process_my_profile(message: types.Message):
     add_user(message.chat.id, message.from_user.first_name)
-    text = ("⏱ *Текстовый Live-тайминг*\n\n"
-            "📡 Модуль подключается к серверам трансляции...\n\n"
-            "_(Примечание: Прямо сейчас активных сессий нет или бесплатное API задерживает данные. "
-            "Обычно телеметрия обновляется через некоторое время после клетчатого флага)_")
+    chat_id = message.chat.id
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        user_data = c.execute("SELECT name, xp FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        user_name, xp = user_data[0], user_data[1]
+        
+        # Получаем статистику по прогнозам
+        stats = c.execute("SELECT AVG(accuracy), COUNT(race_id) FROM predictions WHERE chat_id = ? AND scored = 1", (chat_id,)).fetchone()
+        
+        # Считаем место в рейтинге на основе XP
+        rank_query = c.execute("SELECT COUNT(*) FROM users WHERE xp > (SELECT xp FROM users WHERE chat_id = ?)", (chat_id,)).fetchone()[0]
+        place = rank_query + 1 
+        
+        total_players = c.execute("SELECT COUNT(*) FROM users WHERE xp > 0").fetchone()[0]
+
+    rank_name, next_xp = get_rank_info(xp)
+    
+    text = f"👤 *Профиль: {user_name}*\n\n"
+    text += f"⚜️ *Звание:* {rank_name}\n"
+    text += f"✨ *Опыт:* {xp} XP\n"
+    
+    if next_xp:
+        text += f"📈 *До следующего ранга:* {next_xp - xp} XP\n\n"
+    else:
+        text += f"🌟 *Достигнут максимальный ранг!*\n\n"
+    
+    if stats[1] == 0 or stats[0] is None:
+        text += ("📉 *Статистика прогнозов:*\n"
+                 "У тебя пока нет рассчитанных результатов. Сделай свой первый прогноз!")
+    else:
+        avg_acc = int(stats[0])
+        count = stats[1]
+        text += (f"🎯 *Средняя точность:* {avg_acc}%\n"
+                 f"🏁 *Сделано прогнозов:* {count}\n"
+                 f"🏆 *Место в рейтинге:* {place} из {max(1, total_players)}\n")
+                 
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text == '🔎 Инфо и Профили')
