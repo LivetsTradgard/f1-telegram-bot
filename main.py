@@ -2,6 +2,7 @@ import os
 import asyncio
 import aiohttp
 import sqlite3
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -91,17 +92,32 @@ def get_user_settings():
         return [{"chat_id": row[0], "notify_time": row[1]} for row in conn.execute("SELECT chat_id, notify_time FROM users")]
 
 async def fetch_f1_data(endpoint: str, params: dict = None) -> dict:
+    cache_key = endpoint.replace('/', '_')
+    if params:
+        cache_key += "_" + "_".join([f"{k}_{v}" for k, v in params.items()])
+    cache_file = f"cache_{cache_key}.json"
+
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         headers = {"User-Agent": "F1TelegramBot/1.0"}
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             async with session.get(f"{API_URL}/{endpoint}.json", params=params) as response:
                 if response.status == 200:
-                    return await response.json()
-                return None
+                    data = await response.json()
+                    with open(cache_file, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False)
+                    return data
     except Exception as e:
         print(f"API Error ({endpoint}): {e}")
-        return None
+
+    try:
+        if os.path.exists(cache_file):
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Cache Read Error ({endpoint}): {e}")
+
+    return None
 
 # --- НОВЫЙ БЛОК: Запрос погоды ---
 def get_weather_emoji(code):
