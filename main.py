@@ -129,7 +129,7 @@ async def generate_trivia_question():
         print("Отсутствует GEMINI_API_KEY")
         return None
         
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){GEMINI_KEY}"
     prompt = ("Ты эксперт по автоспорту. Придумай один сложный и интересный вопрос для викторины по Формуле-1 "
               "(история, регламент, гонщики или трассы). "
               "Ответь СТРОГО в формате JSON без маркдауна и лишних слов. "
@@ -143,8 +143,7 @@ async def generate_trivia_question():
                 if resp.status == 200:
                     data = await resp.json()
                     text = data['candidates'][0]['content']['parts'][0]['text']
-                    clean_text = re.sub(r'^```json\s*|
-```$', '', text, flags=re.MULTILINE).strip()
+                    clean_text = text.replace("```json", "").replace("```", "").strip()
                     return json.loads(clean_text)
     except Exception as e:
         print(f"LLM Error: {e}")
