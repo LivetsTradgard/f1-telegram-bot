@@ -3,6 +3,8 @@ import asyncio
 import aiohttp
 import sqlite3
 import json
+import re
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -16,6 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
+GEMINI_KEY = os.getenv('GEMINI_API_KEY')
 
 if not TOKEN:
     exit(1)
@@ -76,6 +79,10 @@ def init_db():
             c.execute("ALTER TABLE predictions ADD COLUMN accuracy INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+            
+        # Новые таблицы для новостей и викторин
+        c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS polls (poll_id TEXT PRIMARY KEY, correct_id INTEGER)")
 
 def add_user(chat_id, name=None):
     user_name = name or "Гонщик"
@@ -119,7 +126,112 @@ async def fetch_f1_data(endpoint: str, params: dict = None) -> dict:
 
     return None
 
-# --- НОВЫЙ БЛОК: Запрос погоды ---
+# --- НОВЫЙ БЛОК: Нейросеть (Gemini) и Викторина ---
+async def generate_trivia_question():
+    if not GEMINI_KEY:
+        print("Отсутствует GEMINI_API_KEY")
+        return None
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    prompt = ("Ты эксперт по автоспорту. Придумай один сложный и интересный вопрос для викторины по Формуле-1 "
+              "(история, регламент, гонщики или трассы). "
+              "Ответь СТРОГО в формате JSON без маркдауна и лишних слов. "
+              "Ключи: 'question' (строка), 'options' (массив ровно из 4 строк), 'correct_id' (число от 0 до 3, индекс правильного ответа).")
+              
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    text = data['candidates'][0]['content']['parts'][0]['text']
+                    # Очищаем от возможных тегов ```json ... ```
+                    clean_text = re.sub(r'^```json\s*|```$', '', text, flags=re.MULTILINE).strip()
+                    return json.loads(clean_text)
+    except Exception as e:
+        print(f"LLM Error: {e}")
+    return None
+
+async def send_daily_trivia():
+    quiz_data = await generate_trivia_question()
+    if not quiz_data:
+        return
+        
+    users = get_user_settings()
+    with sqlite3.connect(DB_PATH) as conn:
+        for user in users:
+            try:
+                # Отправляем именно викторину (type='quiz') и делаем ее неанонимной, чтобы видеть, кто ответил!
+                msg = await bot.send_poll(
+                    chat_id=user['chat_id'],
+                    question=f"🧠 Вопрос дня:\n{quiz_data['question']}",
+                    options=quiz_data['options'],
+                    type='quiz',
+                    correct_option_id=quiz_data['correct_id'],
+                    is_anonymous=False 
+                )
+                # Сохраняем ID опроса, чтобы потом начислить опыт
+                conn.execute("INSERT INTO polls (poll_id, correct_id) VALUES (?, ?)", (msg.poll.id, quiz_data['correct_id']))
+            except Exception:
+                pass
+
+@dp.poll_answer()
+async def handle_poll_answer(poll_answer: types.PollAnswer):
+    user_id = poll_answer.user.id
+    selected_option = poll_answer.option_ids[0]
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        row = c.execute("SELECT correct_id FROM polls WHERE poll_id = ?", (poll_answer.poll_id,)).fetchone()
+        
+        if row:
+            if row[0] == selected_option:
+                # Начисляем 10 XP за верный ответ!
+                c.execute("UPDATE users SET xp = xp + 10 WHERE chat_id = ?", (user_id,))
+                try:
+                    await bot.send_message(user_id, "✅ Блестящий ответ! Заработал +10 XP к рейтингу.")
+                except: pass
+            else:
+                try:
+                    await bot.send_message(user_id, "❌ Увы, интуиция подвела. В следующий раз повезет!")
+                except: pass
+# --------------------------------------------------
+
+# --- НОВЫЙ БЛОК: Запрос новостей (F1News RSS) ---
+async def check_and_send_news():
+    url = "https://www.f1news.ru/export/news.xml"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    xml_data = await resp.text()
+                    root = ET.fromstring(xml_data)
+                    item = root.find('.//item') # Берем самую свежую новость
+                    if not item: return
+                    
+                    title = item.find('title').text
+                    link = item.find('link').text
+                    
+                    with sqlite3.connect(DB_PATH) as conn:
+                        c = conn.cursor()
+                        last_link = c.execute("SELECT value FROM settings WHERE key = 'last_news'").fetchone()
+                        
+                        # Если новости еще не было в базе, рассылаем!
+                        if not last_link or last_link[0] != link:
+                            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_news', ?)", (link,))
+                            
+                            users = get_user_settings()
+                            msg = f"📰 *Главная новость паддока:*\n\n{title}\n\n🔗 [Читать подробнее]({link})"
+                            for user in users:
+                                try:
+                                    await bot.send_message(user['chat_id'], msg, parse_mode="Markdown")
+                                except: pass
+    except Exception as e:
+        print(f"News fetch error: {e}")
+# ------------------------------------------------
+
+# --- БЛОК: Запрос погоды ---
 def get_weather_emoji(code):
     if code in [0, 1]: return "☀️" # Ясно
     if code in [2, 3]: return "☁️" # Облачность
@@ -132,7 +244,6 @@ async def fetch_weather(lat: float, lon: float, target_date_str: str = None) -> 
     url = "https://api.open-meteo.com/v1/forecast"
     try:
         if not target_date_str:
-            # Текущая погода
             params = {"latitude": lat, "longitude": lon, "current_weather": "true"}
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params) as resp:
@@ -140,7 +251,6 @@ async def fetch_weather(lat: float, lon: float, target_date_str: str = None) -> 
                         data = await resp.json()
                         return data.get("current_weather")
         else:
-            # Прогноз на конкретный день
             params = {
                 "latitude": lat, "longitude": lon,
                 "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
@@ -578,9 +688,7 @@ async def process_archive_year(message: types.Message, state: FSMContext):
     
     tmp_msg = await message.answer(f"🔄 Поднимаю архивы за {year_str} год...")
     
-    # Теперь парсим Топ-10 пилотов
     driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 10})
-    # И Топ-3 конструкторов (Кубок существует только с 1958 года)
     team_data = await fetch_f1_data(f"{year_str}/constructorStandings", params={"limit": 3}) if int(year_str) >= 1958 else None
     
     if not driver_data or 'MRData' not in driver_data:
@@ -590,7 +698,6 @@ async def process_archive_year(message: types.Message, state: FSMContext):
     try:
         text = f"📜 *Итоги сезона {year_str}*\n\n"
         
-        # Блок команд
         if team_data and team_data['MRData']['StandingsTable']['StandingsLists']:
             teams = team_data['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings']
             text += "🏎 *Кубок конструкторов (Топ-3):*\n"
@@ -600,7 +707,6 @@ async def process_archive_year(message: types.Message, state: FSMContext):
         elif int(year_str) < 1958:
             text += "🏎 _Кубок конструкторов в этот год еще не разыгрывался_\n\n"
 
-        # Блок пилотов
         standings = driver_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
         text += "🏆 *Личный зачет (Топ-10):*\n"
         for i, d in enumerate(standings):
@@ -669,10 +775,8 @@ async def process_next_race(message: types.Message):
         for date_key, events in schedule_by_date.items(): 
             text += f"*{date_key}:*\n" + "\n".join(events) + "\n\n"
             
-        # Логика прогноза погоды
         if main_race_date_str and lat and lon and main_race_dt:
             days_until = (main_race_dt.date() - datetime.now(ZoneInfo("Europe/Moscow")).date()).days
-            # Если до гонки 3 дня или меньше — показываем прогноз
             if 0 <= days_until <= 3:
                 forecast = await fetch_weather(float(lat), float(lon), target_date_str=main_race_date_str)
                 if forecast:
@@ -797,6 +901,9 @@ async def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_schedule_and_notify, 'interval', minutes=5)
     scheduler.add_job(check_race_results, 'interval', minutes=15) 
+    # каждые 3 часа
+    scheduler.add_job(check_and_send_news, 'interval', hours=3)
+    scheduler.add_job(send_daily_trivia, 'cron', hour=12, minute=0, timezone=ZoneInfo("Europe/Moscow"))
     scheduler.start()
     
     await bot.delete_webhook(drop_pending_updates=True)
