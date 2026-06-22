@@ -125,17 +125,18 @@ async def fetch_f1_data(endpoint: str, params: dict = None) -> dict:
     return None
 
 async def generate_trivia_question():
-    if not GEMINI_KEY: # GEMINI_KEY в твоем .env теперь хранит ключ от Groq
-        print("Отсутствует ключ Groq")
+    key = os.getenv('GEMINI_API_KEY', '').strip()
+    if not key:
+        print("Ошибка: API ключ не найден")
         return None
         
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {GEMINI_KEY}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json"
     }
     
-    prompt = ("Ты эксперт по автоспорту. Придумай один сложный и интересный вопрос для викторины по Формуле-1. "
+    prompt = ("Ты эксперт по автоспорту. Придумай один сложный и интересный вопрос для викторины по Ф1. "
               "Ответь СТРОГО в формате JSON без маркдауна. "
               "Ключи: 'question' (строка), 'options' (массив из 4 строк), 'correct_id' (число от 0 до 3).")
               
@@ -146,18 +147,17 @@ async def generate_trivia_question():
     }
     
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     text = data['choices'][0]['message']['content']
                     return json.loads(text)
                 else:
-                    print(f"Groq API Error: {resp.status}")
+                    print(f"Groq API Error: Статус {resp.status}")
                     return None
     except Exception as e:
-        print(f"Groq Error: {e}")
+        print(f"Groq Exception: {e}")
     return None
 
 async def send_daily_trivia():
