@@ -418,14 +418,14 @@ async def cmd_start(message: types.Message):
 async def force_quiz(message: types.Message):
     if message.chat.id != 733477024:
         return
-    await message.answer("🔄 Связываюсь с нейросетью... Генерирую вопрос (это займет пару секунд).")
+    await message.answer("🔄Генерирую вопрос...")
     await send_daily_trivia()
 
 @dp.message(F.text == '/news')
 async def force_news(message: types.Message):
     if message.chat.id != 733477024:
         return
-    await message.answer("🔄 Проверяю свежие новости (отправятся всем, если есть новые)...")
+    await message.answer("🔄 Проверяю свежие новости...")
     await check_and_send_news()
 
 def generate_drivers_kb(drivers_list: list, exclude: list = None) -> InlineKeyboardMarkup:
