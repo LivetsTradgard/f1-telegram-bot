@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -129,7 +129,7 @@ async def generate_trivia_question():
         print("Отсутствует GEMINI_API_KEY")
         return None
         
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     prompt = ("Ты эксперт по автоспорту. Придумай один сложный и интересный вопрос для викторины по Формуле-1 "
               "(история, регламент, гонщики или трассы). "
               "Ответь СТРОГО в формате JSON без маркдауна и лишних слов. "
@@ -138,13 +138,25 @@ async def generate_trivia_question():
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     text = data['candidates'][0]['content']['parts'][0]['text']
-                    clean_text = text.replace("```json", "").replace("```", "").strip()
-                    return json.loads(clean_text)
+                    
+                    start_idx = text.find('{')
+                    end_idx = text.rfind('}')
+                    
+                    if start_idx != -1 and end_idx != -1:
+                        json_str = text[start_idx:end_idx+1]
+                        return json.loads(json_str)
+                    else:
+                        print("LLM Error: Нейросеть не вернула JSON.")
+                        return None
+                else:
+                    print(f"LLM Error: Статус {resp.status}")
+                    return None
     except Exception as e:
         print(f"LLM Error: {e}")
     return None
@@ -183,7 +195,7 @@ async def handle_poll_answer(poll_answer: types.PollAnswer):
             if row[0] == selected_option:
                 c.execute("UPDATE users SET xp = xp + 10 WHERE chat_id = ?", (user_id,))
                 try:
-                    await bot.send_message(user_id, "✅ Блестящий ответ! Заработал +10 XP к рейтингу.")
+                    await bot.send_message(user_id, "✅ Блестящий ответ! Вы заработали +10 XP!")
                 except: pass
             else:
                 try:
@@ -199,7 +211,8 @@ async def check_and_send_news():
                     xml_data = await resp.text()
                     root = ET.fromstring(xml_data)
                     item = root.find('.//item')
-                    if not item: return
+                    
+                    if item is None: return
                     
                     title = item.find('title').text
                     link = item.find('link').text
@@ -414,19 +427,42 @@ async def cmd_start(message: types.Message):
                     f"Используй кнопки внизу для навигации!")
     await message.answer(welcome_text, reply_markup=get_reply_keyboard())
 
-@dp.message(F.text == '/quiz')
+@dp.message(Command('quiz'))
 async def force_quiz(message: types.Message):
-    if message.chat.id != 733477024:
+    if message.from_user.id != 733477024:
         return
-    await message.answer("🔄Генерирую вопрос...")
-    await send_daily_trivia()
+    tmp_msg = await message.answer("🔄Генерирую вопрос...")
+    
+    quiz_data = await generate_trivia_question()
+    if not quiz_data:
+        await tmp_msg.edit_text("❌ Ошибка при генерации вопроса.")
+        return
+        
+    users = get_user_settings()
+    with sqlite3.connect(DB_PATH) as conn:
+        for user in users:
+            try:
+                poll_msg = await bot.send_poll(
+                    chat_id=user['chat_id'],
+                    question=f"🧠 Вопрос дня:\n{quiz_data['question']}",
+                    options=quiz_data['options'],
+                    type='quiz',
+                    correct_option_id=quiz_data['correct_id'],
+                    is_anonymous=False 
+                )
+                conn.execute("INSERT INTO polls (poll_id, correct_id) VALUES (?, ?)", (poll_msg.poll.id, quiz_data['correct_id']))
+            except Exception as e:
+                print(f"Ошибка отправки викторины пользователю {user['chat_id']}: {e}")
+                
+    await tmp_msg.edit_text("✅ Вопрос успешно сгенерирован!")
 
-@dp.message(F.text == '/news')
+@dp.message(Command('news'))
 async def force_news(message: types.Message):
-    if message.chat.id != 733477024:
+    if message.from_user.id != 733477024:
         return
-    await message.answer("🔄 Проверяю свежие новости...")
+    tmp_msg = await message.answer("🔄 Проверяю свежие новости...")
     await check_and_send_news()
+    await tmp_msg.edit_text("✅ Проверка новостей завершена!")
 
 def generate_drivers_kb(drivers_list: list, exclude: list = None) -> InlineKeyboardMarkup:
     if exclude is None: exclude = []
