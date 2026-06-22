@@ -138,6 +138,7 @@ async def generate_trivia_question():
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
+        # Устанавливаем жесткий таймаут 15 секунд, чтобы бот не висел
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as resp:
@@ -145,6 +146,7 @@ async def generate_trivia_question():
                     data = await resp.json()
                     text = data['candidates'][0]['content']['parts'][0]['text']
                     
+                    # Умный парсинг: ищем первую { и последнюю } в ответе
                     start_idx = text.find('{')
                     end_idx = text.rfind('}')
                     
@@ -212,6 +214,7 @@ async def check_and_send_news():
                     root = ET.fromstring(xml_data)
                     item = root.find('.//item')
                     
+                    # Исправлено предупреждение DeprecationWarning
                     if item is None: return
                     
                     title = item.find('title').text
