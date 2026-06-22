@@ -38,7 +38,6 @@ class Predict(StatesGroup):
     waiting_p3 = State()
 
 def get_rank_info(xp):
-    """Возвращает кортеж (Название ранга, XP для следующего ранга)"""
     if xp < 200: return ("🏎 Новичок картинга", 200)
     elif xp < 500: return ("🥉 Пилот Формулы-3", 500)
     elif xp < 1000: return ("🥈 Пилот Формулы-2", 1000)
@@ -80,7 +79,6 @@ def init_db():
         except sqlite3.OperationalError:
             pass
             
-        # Новые таблицы для новостей и викторин
         c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
         c.execute("CREATE TABLE IF NOT EXISTS polls (poll_id TEXT PRIMARY KEY, correct_id INTEGER)")
 
@@ -126,7 +124,6 @@ async def fetch_f1_data(endpoint: str, params: dict = None) -> dict:
 
     return None
 
-# --- НОВЫЙ БЛОК: Нейросеть (Gemini) и Викторина ---
 async def generate_trivia_question():
     if not GEMINI_KEY:
         print("Отсутствует GEMINI_API_KEY")
@@ -146,8 +143,8 @@ async def generate_trivia_question():
                 if resp.status == 200:
                     data = await resp.json()
                     text = data['candidates'][0]['content']['parts'][0]['text']
-                    # Очищаем от возможных тегов ```json ... ```
-                    clean_text = re.sub(r'^```json\s*|```$', '', text, flags=re.MULTILINE).strip()
+                    clean_text = re.sub(r'^```json\s*|
+```$', '', text, flags=re.MULTILINE).strip()
                     return json.loads(clean_text)
     except Exception as e:
         print(f"LLM Error: {e}")
@@ -162,7 +159,6 @@ async def send_daily_trivia():
     with sqlite3.connect(DB_PATH) as conn:
         for user in users:
             try:
-                # Отправляем именно викторину (type='quiz') и делаем ее неанонимной, чтобы видеть, кто ответил!
                 msg = await bot.send_poll(
                     chat_id=user['chat_id'],
                     question=f"🧠 Вопрос дня:\n{quiz_data['question']}",
@@ -171,7 +167,6 @@ async def send_daily_trivia():
                     correct_option_id=quiz_data['correct_id'],
                     is_anonymous=False 
                 )
-                # Сохраняем ID опроса, чтобы потом начислить опыт
                 conn.execute("INSERT INTO polls (poll_id, correct_id) VALUES (?, ?)", (msg.poll.id, quiz_data['correct_id']))
             except Exception:
                 pass
@@ -187,7 +182,6 @@ async def handle_poll_answer(poll_answer: types.PollAnswer):
         
         if row:
             if row[0] == selected_option:
-                # Начисляем 10 XP за верный ответ!
                 c.execute("UPDATE users SET xp = xp + 10 WHERE chat_id = ?", (user_id,))
                 try:
                     await bot.send_message(user_id, "✅ Блестящий ответ! Заработал +10 XP к рейтингу.")
@@ -196,9 +190,7 @@ async def handle_poll_answer(poll_answer: types.PollAnswer):
                 try:
                     await bot.send_message(user_id, "❌ Увы, интуиция подвела. В следующий раз повезет!")
                 except: pass
-# --------------------------------------------------
 
-# --- НОВЫЙ БЛОК: Запрос новостей (F1News RSS) ---
 async def check_and_send_news():
     url = "https://www.f1news.ru/export/news.xml"
     try:
@@ -207,7 +199,7 @@ async def check_and_send_news():
                 if resp.status == 200:
                     xml_data = await resp.text()
                     root = ET.fromstring(xml_data)
-                    item = root.find('.//item') # Берем самую свежую новость
+                    item = root.find('.//item')
                     if not item: return
                     
                     title = item.find('title').text
@@ -217,7 +209,6 @@ async def check_and_send_news():
                         c = conn.cursor()
                         last_link = c.execute("SELECT value FROM settings WHERE key = 'last_news'").fetchone()
                         
-                        # Если новости еще не было в базе, рассылаем!
                         if not last_link or last_link[0] != link:
                             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_news', ?)", (link,))
                             
@@ -229,15 +220,13 @@ async def check_and_send_news():
                                 except: pass
     except Exception as e:
         print(f"News fetch error: {e}")
-# ------------------------------------------------
 
-# --- БЛОК: Запрос погоды ---
 def get_weather_emoji(code):
-    if code in [0, 1]: return "☀️" # Ясно
-    if code in [2, 3]: return "☁️" # Облачность
-    if code in [45, 48]: return "🌫" # Туман
-    if code in [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82]: return "🌧" # Дождь
-    if code in [95, 96, 99]: return "⛈" # Гроза
+    if code in [0, 1]: return "☀️"
+    if code in [2, 3]: return "☁️"
+    if code in [45, 48]: return "🌫"
+    if code in [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82]: return "🌧"
+    if code in [95, 96, 99]: return "⛈"
     return "🌡"
 
 async def fetch_weather(lat: float, lon: float, target_date_str: str = None) -> dict:
@@ -272,7 +261,6 @@ async def fetch_weather(lat: float, lon: float, target_date_str: str = None) -> 
     except Exception as e:
         print(f"Weather fetch error: {e}")
     return None
-# ----------------------------------
 
 def get_reply_keyboard():
     keyboard = [
@@ -426,6 +414,20 @@ async def cmd_start(message: types.Message):
     welcome_text = (f"Привет, {user_name}! 🏎💨\n\nЯ — твой личный бот-помощник по Формуле-1.\n"
                     f"Используй кнопки внизу для навигации!")
     await message.answer(welcome_text, reply_markup=get_reply_keyboard())
+
+@dp.message(F.text == '/quiz')
+async def force_quiz(message: types.Message):
+    if message.chat.id != 733477024:
+        return
+    await message.answer("🔄 Связываюсь с нейросетью... Генерирую вопрос (это займет пару секунд).")
+    await send_daily_trivia()
+
+@dp.message(F.text == '/news')
+async def force_news(message: types.Message):
+    if message.chat.id != 733477024:
+        return
+    await message.answer("🔄 Проверяю свежие новости (отправятся всем, если есть новые)...")
+    await check_and_send_news()
 
 def generate_drivers_kb(drivers_list: list, exclude: list = None) -> InlineKeyboardMarkup:
     if exclude is None: exclude = []
@@ -648,7 +650,6 @@ async def show_circuit_info(callback: types.CallbackQuery):
                 f"🌍 Страна: {loc.get('country', '')}\n"
                 f"📌 Координаты: `{lat}, {lon}`\n")
         
-        # Запрашиваем текущую погоду по координатам
         if lat and lon:
             weather = await fetch_weather(float(lat), float(lon))
             if weather:
@@ -901,7 +902,6 @@ async def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_schedule_and_notify, 'interval', minutes=5)
     scheduler.add_job(check_race_results, 'interval', minutes=15) 
-    # каждые 3 часа
     scheduler.add_job(check_and_send_news, 'interval', hours=3)
     scheduler.add_job(send_daily_trivia, 'cron', hour=12, minute=0, timezone=ZoneInfo("Europe/Moscow"))
     scheduler.start()
