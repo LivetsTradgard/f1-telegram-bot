@@ -143,7 +143,7 @@ async def generate_trivia_question():
               "Ключи: 'question' (строка), 'options' (массив из 4 строк), 'correct_id' (число от 0 до 3).")
               
     payload = {
-        "model": "google/gemini-2.0-flash-exp:free", 
+        "model": "openrouter/free", 
         "messages": [{"role": "user", "content": prompt}]
     }
     
