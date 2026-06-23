@@ -138,30 +138,49 @@ async def generate_trivia_question():
         "Content-Type": "application/json"
     }
     
-    prompt = ("Ты эксперт по автоспорту. Придумай один сложный и интересный вопрос для викторины по Формуле-1. "
-              "Отвечай ТОЛЬКО на чистом и грамотном русском языке. Использование любых других алфавитов строго запрещено. "
-              "Ответь СТРОГО в формате JSON без маркдауна. "
-              "Ключи: 'question' (строка), 'options' (массив из 4 строк), 'correct_id' (число от 0 до 3).")
+    prompt = (
+        "You are a Formula 1 expert. Generate one unique and interesting multiple-choice trivia question "
+        "about Formula 1 history, drivers, teams, or regulations. "
+        "Requirements: The question and all answer options MUST be written in Russian language.\n\n"
+        "You must respond ONLY with a valid JSON object matching this schema:\n"
+        "{\n"
+        '  "question": "The question text in Russian",\n'
+        '  "options": ["Choice 1", "Choice 2", "Choice 3", "Choice 4"],\n'
+        '  "correct_id": 0\n'
+        "}\n\n"
+        "Where 'correct_id' is the integer index (0 to 3) of the right answer.\n"
+        "Do not include any markdown formatting, code blocks (like ```json), or extra text. "
+        "Output only the raw valid JSON string."
+    )
               
     payload = {
         "model": "openrouter/free", 
-        "messages": [{"role": "user", "content": prompt}]
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1000
     }
     
     try:
-        timeout = aiohttp.ClientTimeout(total=20)
+        timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    text = data['choices'][0]['message']['content']
+                    text = data['choices'][0]['message'].get('content')
                     
+                    if not text:
+                        print("API Error: Получен пустой текст ответа.")
+                        return None
+                        
                     start_idx = text.find('{')
                     end_idx = text.rfind('}')
                     
                     if start_idx != -1 and end_idx != -1:
                         json_str = text[start_idx:end_idx+1]
-                        return json.loads(json_str)
+                        try:
+                            return json.loads(json_str)
+                        except json.JSONDecodeError:
+                            print(f"API Error: Ошибка парсинга JSON. Строка: {json_str}")
+                            return None
                     else:
                         print(f"API Error: Нейросеть не вернула JSON. Ответ: {text}")
                         return None
@@ -169,6 +188,9 @@ async def generate_trivia_question():
                     error_text = await resp.text() 
                     print(f"OpenRouter API Error: Статус {resp.status}, Детали: {error_text}")
                     return None
+    except asyncio.TimeoutError:
+        print("OpenRouter Error: Превышено время ожидания ответа от сервера.")
+        return None
     except Exception as e:
         print(f"OpenRouter Exception: {e}")
     return None
@@ -255,7 +277,7 @@ def get_weather_emoji(code):
     return "🌡"
 
 async def fetch_weather(lat: float, lon: float, target_date_str: str = None) -> dict:
-    url = "https://api.open-meteo.com/v1/forecast"
+    url = "[https://api.open-meteo.com/v1/forecast](https://api.open-meteo.com/v1/forecast)"
     try:
         if not target_date_str:
             params = {"latitude": lat, "longitude": lon, "current_weather": "true"}
