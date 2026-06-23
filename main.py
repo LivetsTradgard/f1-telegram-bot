@@ -196,10 +196,23 @@ async def generate_trivia_question():
     return None
 
 async def send_daily_trivia():
-    quiz_data = await generate_trivia_question()
-    if not quiz_data:
-        return
+    quiz_data = None
+    max_attempts = 15
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            quiz_data = await generate_trivia_question()
+            if quiz_data:
+                break # Успех
+        except Exception as e:
+            print(f"Попытка {attempt} не удалась: {e}")
         
+        await asyncio.sleep(60)
+        
+    if not quiz_data:
+        print("Не удалось сгенерировать вопрос после 15 попыток. Викторина сегодня отменяется.")
+        return
+    
     users = get_user_settings()
     with sqlite3.connect(DB_PATH) as conn:
         for user in users:
@@ -213,8 +226,8 @@ async def send_daily_trivia():
                     is_anonymous=False 
                 )
                 conn.execute("INSERT INTO polls (poll_id, correct_id) VALUES (?, ?)", (msg.poll.id, quiz_data['correct_id']))
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Не удалось отправить вопрос пользователю {user['chat_id']}: {e}")
 
 @dp.poll_answer()
 async def handle_poll_answer(poll_answer: types.PollAnswer):
@@ -970,7 +983,7 @@ async def main():
     scheduler.add_job(check_schedule_and_notify, 'interval', minutes=5)
     scheduler.add_job(check_race_results, 'interval', minutes=15) 
     scheduler.add_job(check_and_send_news, 'interval', hours=3)
-    scheduler.add_job(send_daily_trivia, 'cron', hour=12, minute=0, timezone=ZoneInfo("Europe/Moscow"))
+    scheduler.add_job(send_daily_trivia, 'cron', hour=12, minute=14, timezone=ZoneInfo("Europe/Moscow"))
     scheduler.start()
     
     await bot.delete_webhook(drop_pending_updates=True)
