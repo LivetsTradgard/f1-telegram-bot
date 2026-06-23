@@ -138,7 +138,8 @@ async def generate_trivia_question():
         "Content-Type": "application/json"
     }
     
-    prompt = ("Ты эксперт по автоспорту. Придумай один сложный и интересный вопрос для викторины по Ф1. "
+    prompt = ("Ты эксперт по автоспорту. Придумай один сложный и интересный вопрос для викторины по Формуле-1. "
+              "Отвечай ТОЛЬКО на чистом и грамотном русском языке. Использование любых других алфавитов строго запрещено. "
               "Ответь СТРОГО в формате JSON без маркдауна. "
               "Ключи: 'question' (строка), 'options' (массив из 4 строк), 'correct_id' (число от 0 до 3).")
               
@@ -443,38 +444,35 @@ async def cmd_start(message: types.Message):
 async def force_quiz(message: types.Message):
     if message.from_user.id != 733477024:
         return
-    tmp_msg = await message.answer("🔄Генерирую вопрос...")
+        
+    tmp_msg = await message.answer("🔄 Генерирую тестовый вопрос...")
     
     quiz_data = await generate_trivia_question()
     if not quiz_data:
         await tmp_msg.edit_text("❌ Ошибка при генерации вопроса.")
         return
         
-    users = get_user_settings()
-    with sqlite3.connect(DB_PATH) as conn:
-        for user in users:
-            try:
-                poll_msg = await bot.send_poll(
-                    chat_id=user['chat_id'],
-                    question=f"🧠 Вопрос дня:\n{quiz_data['question']}",
-                    options=quiz_data['options'],
-                    type='quiz',
-                    correct_option_id=quiz_data['correct_id'],
-                    is_anonymous=False 
-                )
-                conn.execute("INSERT INTO polls (poll_id, correct_id) VALUES (?, ?)", (poll_msg.poll.id, quiz_data['correct_id']))
-            except Exception as e:
-                print(f"Ошибка отправки викторины пользователю {user['chat_id']}: {e}")
-                
-    await tmp_msg.edit_text("✅ Вопрос успешно сгенерирован!")
+    try:
+        poll_msg = await bot.send_poll(
+            chat_id=message.chat.id,
+            question=f"🧠 Вопрос дня:\n{quiz_data['question']}",
+            options=quiz_data['options'],
+            type='quiz',
+            correct_option_id=quiz_data['correct_id'],
+            is_anonymous=False 
+        )
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("INSERT INTO polls (poll_id, correct_id) VALUES (?, ?)", (poll_msg.poll.id, quiz_data['correct_id']))
+        await tmp_msg.delete()
+    except Exception as e:
+        print(f"Ошибка тестовой отправки: {e}")
+        await tmp_msg.edit_text("❌ Ошибка отправки опроса в Телеграм.")
 
 @dp.message(Command('news'))
 async def force_news(message: types.Message):
     if message.from_user.id != 733477024:
         return
-    tmp_msg = await message.answer("🔄 Проверяю свежие новости...")
     await check_and_send_news()
-    await tmp_msg.edit_text("✅ Проверка новостей завершена!")
 
 def generate_drivers_kb(drivers_list: list, exclude: list = None) -> InlineKeyboardMarkup:
     if exclude is None: exclude = []
