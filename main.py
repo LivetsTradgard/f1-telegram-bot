@@ -130,9 +130,11 @@ async def generate_trivia_question():
         print("Ошибка: API ключ не найден")
         return None
         
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {key}",
+        "HTTP-Referer": "https://t.me/F1TelegramBot", 
+        "X-Title": "F1 Trivia Bot",
         "Content-Type": "application/json"
     }
     
@@ -141,23 +143,32 @@ async def generate_trivia_question():
               "Ключи: 'question' (строка), 'options' (массив из 4 строк), 'correct_id' (число от 0 до 3).")
               
     payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [{"role": "user", "content": prompt}],
-        "response_format": {"type": "json_object"}
+        "model": "google/gemini-2.0-flash-lite-preview-02-05:free", 
+        "messages": [{"role": "user", "content": prompt}]
     }
     
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     text = data['choices'][0]['message']['content']
-                    return json.loads(text)
+                    
+                    start_idx = text.find('{')
+                    end_idx = text.rfind('}')
+                    
+                    if start_idx != -1 and end_idx != -1:
+                        json_str = text[start_idx:end_idx+1]
+                        return json.loads(json_str)
+                    else:
+                        print(f"API Error: Нейросеть не вернула JSON. Ответ: {text}")
+                        return None
                 else:
-                    print(f"Groq API Error: Статус {resp.status}")
+                    print(f"OpenRouter API Error: Статус {resp.status}")
                     return None
     except Exception as e:
-        print(f"Groq Exception: {e}")
+        print(f"OpenRouter Exception: {e}")
     return None
 
 async def send_daily_trivia():
