@@ -494,11 +494,20 @@ async def pull_new_card(callback: types.CallbackQuery):
         c.execute("SELECT count FROM inventory WHERE chat_id = ? AND driver_id = ?", (chat_id, driver['id']))
         existing_card = c.fetchone()
         
+        xp_rewards = {
+            "common": 15,
+            "rare": 30,
+            "epic": 60,
+            "mythic": 100, 
+            "legendary": 200,
+            "special": 500
+        }
+        reward = xp_rewards[rarity]
+        
         is_duplicate = False
         if existing_card:
             is_duplicate = True
-            # Начисляем +15 XP за дубликат
-            c.execute("UPDATE users SET xp = xp + 15 WHERE chat_id = ?", (chat_id,))
+            c.execute("UPDATE users SET xp = xp + ? WHERE chat_id = ?", (reward, chat_id))
         
         c.execute("""
             INSERT INTO inventory (chat_id, driver_id, rarity, count) 
@@ -512,7 +521,7 @@ async def pull_new_card(callback: types.CallbackQuery):
     rarity_name = RARITY_INFO[rarity]['name']
     
     if is_duplicate:
-        msg = f"Выпал {rarity_name} {driver['name']} *(Дубликат! ✨ +15 XP)*\nСледующее открытие будет доступно через 6 часов."
+        msg = f"Выпал {rarity_name} {driver['name']} *(Дубликат! ✨ +{reward} XP)*\nСледующее открытие будет доступно через 6 часов."
     else:
         msg = f"Выпал {rarity_name} {driver['name']} 🎉\nСледующее открытие будет доступно через 6 часов."
            
@@ -627,22 +636,26 @@ async def process_leaderboard(message: types.Message):
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         data = c.execute("""
-            SELECT u.name, u.xp, AVG(p.accuracy), COUNT(p.race_id)
+            SELECT u.name, u.xp, COALESCE(AVG(p.accuracy), 0), COUNT(p.race_id),
+                   (SELECT COUNT(DISTINCT driver_id) FROM inventory WHERE chat_id = u.chat_id) as cards_count
             FROM users u
-            JOIN predictions p ON u.chat_id = p.chat_id
-            WHERE p.scored = 1
+            LEFT JOIN predictions p ON u.chat_id = p.chat_id AND p.scored = 1
             GROUP BY u.chat_id
             ORDER BY u.xp DESC, AVG(p.accuracy) DESC
             LIMIT 10
         """).fetchall()
         
-    if not data: return await message.answer("📊 *Рейтинг пока пуст.*\nДождитесь расчета первых прогнозов после гонки!", parse_mode="Markdown")
+    if not data: 
+        return await message.answer("📊 *Рейтинг пока пуст.*", parse_mode="Markdown")
         
     text = "📊 *Глобальный рейтинг (Топ-10):*\n\n"
-    for i, (name, xp, avg_acc, count) in enumerate(data):
+    for i, (name, xp, avg_acc, count, cards_count) in enumerate(data):
         medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
         rank_name, _ = get_rank_info(xp)
-        text += f"{medal} *{name}* — {xp} XP\n_{rank_name}_ | Точность: {int(avg_acc)}% | Прогнозов: {count}\n\n"
+        
+        cards_count = cards_count if cards_count else 0
+        
+        text += f"{medal} *{name}* — {xp} XP\n_{rank_name}_\n🎴 Пилотов собрано: {cards_count} | Точность: {int(avg_acc)}% | Прогнозов: {count}\n\n"
         
     await message.answer(text, parse_mode="Markdown")
 
@@ -972,6 +985,28 @@ async def process_teams(message: types.Message):
             text += f"{team['position']}. {team['Constructor']['name']} — {team['points']} очков\n"
         await tmp_msg.edit_text(text, parse_mode="Markdown")
     except: await tmp_msg.edit_text("🤷‍♂️ Данные недоступны.")
+
+
+@dp.message(Command('alarm'))
+async def cmd_alarm(message: types.Message):
+    # Проверка на то, что команду вызвал именно ты
+    if message.from_user.id != 733477024:
+        return
+        
+    users = get_user_settings()
+    success = 0
+    
+    await message.answer("🔄 Начинаю рассылку...")
+    
+    for user in users:
+        try:
+            await bot.send_message(user['chat_id'], "Пропишите /start для обновления бота")
+            success += 1
+            await asyncio.sleep(0.05) # Защита от спам-лимитов Telegram
+        except:
+            pass
+            
+    await message.answer(f"✅ Рассылка успешно завершена! Доставлено: {success} пользователям.")
 
 async def main():
     init_db()
