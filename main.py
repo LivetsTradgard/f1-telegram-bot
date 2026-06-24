@@ -511,23 +511,23 @@ async def pull_new_card(callback: types.CallbackQuery):
         if roll <= sp_chance:
             rarity = "special"
             new_sp_pity = 0.0 
-            new_leg_pity = leg_pity + 0.1 
+            new_leg_pity = leg_pity + 0.05 
         elif roll <= sp_chance + leg_chance:
             rarity = "legendary"
-            new_sp_pity = sp_pity + 0.1
+            new_sp_pity = sp_pity + 0.01
             new_leg_pity = 0.0 
         elif roll <= sp_chance + leg_chance + 1.0:
             rarity = "mythic"
-            new_sp_pity, new_leg_pity = sp_pity + 0.1, leg_pity + 0.1
+            new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
         elif roll <= sp_chance + leg_chance + 1.0 + 4.0:
             rarity = "epic"
-            new_sp_pity, new_leg_pity = sp_pity + 0.1, leg_pity + 0.1
+            new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
         elif roll <= sp_chance + leg_chance + 1.0 + 4.0 + 25.0:
             rarity = "rare"
-            new_sp_pity, new_leg_pity = sp_pity + 0.1, leg_pity + 0.1
+            new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
         else:
             rarity = "common"
-            new_sp_pity, new_leg_pity = sp_pity + 0.1, leg_pity + 0.1
+            new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
         
         driver = random.choice(DRIVERS_DB[rarity])
         c.execute("SELECT count FROM inventory WHERE chat_id = ? AND driver_id = ?", (chat_id, driver['id']))
@@ -664,6 +664,7 @@ def get_detailed_profile_text(chat_id):
         
         stats = c.execute("SELECT AVG(accuracy), COUNT(race_id) FROM predictions WHERE chat_id = ? AND scored = 1", (chat_id,)).fetchone()
         
+        # Считаем только активных игроков (была крутка ИЛИ есть в таблице прогнозов)
         active_condition = "(last_pull_time > 0 OR chat_id IN (SELECT chat_id FROM predictions))"
         rank_query = c.execute(f"SELECT COUNT(*) FROM users WHERE xp > ? AND {active_condition}", (xp,)).fetchone()[0]
         place = rank_query + 1 
