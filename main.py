@@ -441,7 +441,6 @@ async def force_news(message: types.Message):
     if message.from_user.id != 733477024: return
     await check_and_send_news()
 
-
 def get_gacha_text_and_kb(chat_id: int):
     total_drivers = sum(len(cat) for cat in DRIVERS_DB.values())
     
@@ -564,7 +563,6 @@ async def back_to_gacha(callback: types.CallbackQuery):
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
 
-
 def generate_drivers_kb(drivers_list: list, exclude: list = None) -> InlineKeyboardMarkup:
     if exclude is None: exclude = []
     buttons, row = [], []
@@ -665,9 +663,11 @@ def get_detailed_profile_text(chat_id):
         user_name, xp, sp_pity, leg_pity = user_data
         
         stats = c.execute("SELECT AVG(accuracy), COUNT(race_id) FROM predictions WHERE chat_id = ? AND scored = 1", (chat_id,)).fetchone()
-        rank_query = c.execute("SELECT COUNT(*) FROM users WHERE xp > ?", (xp,)).fetchone()[0]
+        
+        active_condition = "(last_pull_time > 0 OR chat_id IN (SELECT chat_id FROM predictions))"
+        rank_query = c.execute(f"SELECT COUNT(*) FROM users WHERE xp > ? AND {active_condition}", (xp,)).fetchone()[0]
         place = rank_query + 1 
-        total_players = c.execute("SELECT COUNT(*) FROM users WHERE xp > 0").fetchone()[0]
+        total_players = c.execute(f"SELECT COUNT(*) FROM users WHERE {active_condition}").fetchone()[0]
         
         cards = c.execute("SELECT driver_id, rarity, count FROM inventory WHERE chat_id = ?", (chat_id,)).fetchall()
         total_drivers = sum(len(cat) for cat in DRIVERS_DB.values())
@@ -700,9 +700,7 @@ def get_detailed_profile_text(chat_id):
                  f"🏆 *Место в рейтинге:* {place} из {max(1, total_players)}\n")
     return text
 
-@dp.message(F.text == '📊 Рейтинг игроков')
-async def process_leaderboard(message: types.Message):
-    add_user(message.chat.id, message.from_user.first_name)
+def get_leaderboard_text_and_kb():
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         data = c.execute("""
@@ -710,13 +708,14 @@ async def process_leaderboard(message: types.Message):
                    (SELECT COUNT(DISTINCT driver_id) FROM inventory WHERE chat_id = u.chat_id) as cards_count
             FROM users u
             LEFT JOIN predictions p ON u.chat_id = p.chat_id AND p.scored = 1
+            WHERE u.last_pull_time > 0 OR u.chat_id IN (SELECT chat_id FROM predictions)
             GROUP BY u.chat_id
             ORDER BY u.xp DESC, AVG(p.accuracy) DESC
             LIMIT 10
         """).fetchall()
         
     if not data: 
-        return await message.answer("📊 *Рейтинг пока пуст.*", parse_mode="Markdown")
+        return "📊 *Рейтинг пока пуст.*", None
         
     text = "📊 *Глобальный рейтинг (Топ-10):*\n\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[])
@@ -729,14 +728,37 @@ async def process_leaderboard(message: types.Message):
         text += f"{medal} *{name}* — {xp} XP\n_{rank_name}_ | 🎴 Пилотов: {cards_count}\n\n"
         kb.inline_keyboard.append([InlineKeyboardButton(text=f"{medal} Профиль: {name}", callback_data=f"show_prof_{uid}")])
         
-    text += "Нажми на игрока ниже, чтобы посмотреть его гараж!"
-    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+    text += "_Нажми на игрока ниже, чтобы посмотреть его профиль!_"
+    return text, kb
+
+@dp.message(F.text == '📊 Рейтинг игроков')
+async def process_leaderboard(message: types.Message):
+    add_user(message.chat.id, message.from_user.first_name)
+    text, kb = get_leaderboard_text_and_kb()
+    if kb:
+        await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await message.answer(text, parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith('show_prof_'))
 async def show_other_profile(callback: types.CallbackQuery):
     target_id = int(callback.data.split('_')[2])
     text = get_detailed_profile_text(target_id)
-    await callback.message.answer(text, parse_mode="Markdown")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад к рейтингу", callback_data="back_to_leaderboard")]
+    ])
+    
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == 'back_to_leaderboard')
+async def back_to_leaderboard_callback(callback: types.CallbackQuery):
+    text, kb = get_leaderboard_text_and_kb()
+    if kb:
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
 
 @dp.message(F.text == '👤 Мой профиль')
