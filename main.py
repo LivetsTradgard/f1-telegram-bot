@@ -125,7 +125,10 @@ def init_db():
         for col, col_type, default in [("notify_time", "INTEGER", "60"), 
                                        ("name", "TEXT", "'Гонщик'"), 
                                        ("xp", "INTEGER", "0"),
-                                       ("last_pull_time", "INTEGER", "0")]:
+                                       ("last_pull_time", "INTEGER", "0"),
+                                       ("special_pity", "REAL", "0.0"),
+                                       ("legendary_pity", "REAL", "0.0"),
+                                       ("reminded", "INTEGER", "0")]:
             try:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type} DEFAULT {default}")
             except sqlite3.OperationalError:
@@ -405,6 +408,26 @@ async def check_race_results():
                 conn.execute("UPDATE users SET xp = xp + ? WHERE chat_id = ?", (earned_xp, chat_id))
     except Exception as e: print(f"Results scoring error: {e}")
 
+async def check_gacha_reminders():
+    now = int(time.time())
+    cooldown = 6 * 3600
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        users_to_remind = c.execute("""
+            SELECT chat_id FROM users 
+            WHERE last_pull_time > 0 
+              AND (? - last_pull_time) >= ? 
+              AND reminded = 0
+        """, (now, cooldown)).fetchall()
+        
+        for (chat_id,) in users_to_remind:
+            try:
+                await bot.send_message(chat_id, "🎴 *Твой гараж снова открыт!*\nПрошло 6 часов, самое время подписать нового пилота!", parse_mode="Markdown")
+                c.execute("UPDATE users SET reminded = 1 WHERE chat_id = ?", (chat_id,))
+            except:
+                pass
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     add_user(message.chat.id, message.from_user.first_name)
@@ -471,7 +494,8 @@ async def pull_new_card(callback: types.CallbackQuery):
     
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
-        last_pull = c.execute("SELECT last_pull_time FROM users WHERE chat_id = ?", (chat_id,)).fetchone()[0]
+        user_data = c.execute("SELECT last_pull_time, special_pity, legendary_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        last_pull, sp_pity, leg_pity = user_data
         
         if now - last_pull < cooldown:
             rem = cooldown - (now - last_pull)
@@ -480,28 +504,37 @@ async def pull_new_card(callback: types.CallbackQuery):
             await callback.answer(f"⏳ Следующее открытие будет доступно через {h} ч. {m} мин.", show_alert=True)
             return
             
+        sp_chance = 0.01 + sp_pity
+        leg_chance = 0.1 + leg_pity
+        
         roll = random.uniform(0, 100)
         
-        if roll <= 0.01: rarity = "special"
-        elif roll <= 0.11: rarity = "legendary"   
-        elif roll <= 1.11: rarity = "mythic"     
-        elif roll <= 5.11: rarity = "epic"       
-        elif roll <= 30.11: rarity = "rare"      
-        else: rarity = "common"                 
+        if roll <= sp_chance:
+            rarity = "special"
+            new_sp_pity = 0.0 
+            new_leg_pity = leg_pity + 0.1 
+        elif roll <= sp_chance + leg_chance:
+            rarity = "legendary"
+            new_sp_pity = sp_pity + 0.1
+            new_leg_pity = 0.0 
+        elif roll <= sp_chance + leg_chance + 1.0:
+            rarity = "mythic"
+            new_sp_pity, new_leg_pity = sp_pity + 0.1, leg_pity + 0.1
+        elif roll <= sp_chance + leg_chance + 1.0 + 4.0:
+            rarity = "epic"
+            new_sp_pity, new_leg_pity = sp_pity + 0.1, leg_pity + 0.1
+        elif roll <= sp_chance + leg_chance + 1.0 + 4.0 + 25.0:
+            rarity = "rare"
+            new_sp_pity, new_leg_pity = sp_pity + 0.1, leg_pity + 0.1
+        else:
+            rarity = "common"
+            new_sp_pity, new_leg_pity = sp_pity + 0.1, leg_pity + 0.1
         
         driver = random.choice(DRIVERS_DB[rarity])
-        
         c.execute("SELECT count FROM inventory WHERE chat_id = ? AND driver_id = ?", (chat_id, driver['id']))
         existing_card = c.fetchone()
         
-        xp_rewards = {
-            "common": 15,
-            "rare": 30,
-            "epic": 60,
-            "mythic": 100, 
-            "legendary": 200,
-            "special": 500
-        }
+        xp_rewards = {"common": 15, "rare": 30, "epic": 60, "mythic": 100, "legendary": 200, "special": 500}
         reward = xp_rewards[rarity]
         
         is_duplicate = False
@@ -512,23 +545,17 @@ async def pull_new_card(callback: types.CallbackQuery):
         c.execute("""
             INSERT INTO inventory (chat_id, driver_id, rarity, count) 
             VALUES (?, ?, ?, 1) 
-            ON CONFLICT(chat_id, driver_id) 
-            DO UPDATE SET count = count + 1
+            ON CONFLICT(chat_id, driver_id) DO UPDATE SET count = count + 1
         """, (chat_id, driver['id'], rarity))
         
-        c.execute("UPDATE users SET last_pull_time = ? WHERE chat_id = ?", (now, chat_id))
+        c.execute("UPDATE users SET last_pull_time = ?, special_pity = ?, legendary_pity = ?, reminded = 0 WHERE chat_id = ?", 
+                  (now, new_sp_pity, new_leg_pity, chat_id))
 
     rarity_name = RARITY_INFO[rarity]['name']
-    
-    if is_duplicate:
-        msg = f"Выпал {rarity_name} {driver['name']} *(Дубликат! ✨ +{reward} XP)*\nСледующее открытие будет доступно через 6 часов."
-    else:
-        msg = f"Выпал {rarity_name} {driver['name']} 🎉\nСледующее открытие будет доступно через 6 часов."
+    msg = f"Выпал {rarity_name} {driver['name']} " + ("*(Дубликат! ✨ +{} XP)*".format(reward) if is_duplicate else "🎉")
+    msg += "\nСледующее открытие будет доступно через 6 часов."
            
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад в Гараж", callback_data="back_to_gacha")]
-    ])
-    
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в Гараж", callback_data="back_to_gacha")]])
     await callback.message.edit_text(msg, parse_mode="Markdown", reply_markup=kb)
 
 @dp.callback_query(F.data == 'back_to_gacha')
@@ -630,13 +657,56 @@ async def process_prediction_step(callback: types.CallbackQuery, state: FSMConte
         
     await callback.answer()
 
+def get_detailed_profile_text(chat_id):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        user_data = c.execute("SELECT name, xp, special_pity, legendary_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        if not user_data: return "Пользователь не найден."
+        user_name, xp, sp_pity, leg_pity = user_data
+        
+        stats = c.execute("SELECT AVG(accuracy), COUNT(race_id) FROM predictions WHERE chat_id = ? AND scored = 1", (chat_id,)).fetchone()
+        rank_query = c.execute("SELECT COUNT(*) FROM users WHERE xp > ?", (xp,)).fetchone()[0]
+        place = rank_query + 1 
+        total_players = c.execute("SELECT COUNT(*) FROM users WHERE xp > 0").fetchone()[0]
+        
+        cards = c.execute("SELECT driver_id, rarity, count FROM inventory WHERE chat_id = ?", (chat_id,)).fetchall()
+        total_drivers = sum(len(cat) for cat in DRIVERS_DB.values())
+        unique = len(cards)
+        
+    rank_name, next_xp = get_rank_info(xp)
+    
+    text = f"👤 *Профиль: {user_name}*\n\n⚜️ *Звание:* {rank_name}\n✨ *Опыт:* {xp} XP\n"
+    if next_xp: text += f"📈 *До след. ранга:* {next_xp - xp} XP\n\n"
+    else: text += f"🌟 *Достигнут максимальный ранг!*\n\n"
+    
+    text += f"🎴 *Собрано пилотов:* {unique} из {total_drivers}\n"
+    text += f"🍀 *Текущий шанс на Особую:* {0.01 + sp_pity:.2f}%\n"
+    text += f"🟡 *Текущий шанс на Легенду:* {0.1 + leg_pity:.2f}%\n\n"
+    
+    if unique > 0:
+        text += "*Топ-5 карточек в гараже:*\n"
+        rarity_weight = {"special": 5, "legendary": 4, "mythic": 3, "epic": 2, "rare": 1, "common": 0}
+        all_drivers = {d['id']: d for category in DRIVERS_DB.values() for d in category}
+        sorted_cards = sorted(cards, key=lambda x: (rarity_weight.get(x[1], 0), x[2]), reverse=True)
+        
+        for d_id, rarity, cnt in sorted_cards[:5]:
+            d = all_drivers.get(d_id)
+            if d: text += f"• {RARITY_INFO[rarity]['name'].split(' ')[0]} {d['emoji']} {d['name']} (x{cnt})\n"
+        text += "\n"
+        
+    if stats[1] > 0 and stats[0] is not None:
+        text += (f"🎯 *Точность прогнозов:* {int(stats[0])}%\n"
+                 f"🏁 *Сделано прогнозов:* {stats[1]}\n"
+                 f"🏆 *Место в рейтинге:* {place} из {max(1, total_players)}\n")
+    return text
+
 @dp.message(F.text == '📊 Рейтинг игроков')
 async def process_leaderboard(message: types.Message):
     add_user(message.chat.id, message.from_user.first_name)
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         data = c.execute("""
-            SELECT u.name, u.xp, COALESCE(AVG(p.accuracy), 0), COUNT(p.race_id),
+            SELECT u.chat_id, u.name, u.xp, COALESCE(AVG(p.accuracy), 0),
                    (SELECT COUNT(DISTINCT driver_id) FROM inventory WHERE chat_id = u.chat_id) as cards_count
             FROM users u
             LEFT JOIN predictions p ON u.chat_id = p.chat_id AND p.scored = 1
@@ -649,44 +719,30 @@ async def process_leaderboard(message: types.Message):
         return await message.answer("📊 *Рейтинг пока пуст.*", parse_mode="Markdown")
         
     text = "📊 *Глобальный рейтинг (Топ-10):*\n\n"
-    for i, (name, xp, avg_acc, count, cards_count) in enumerate(data):
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    
+    for i, (uid, name, xp, avg_acc, cards_count) in enumerate(data):
         medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
         rank_name, _ = get_rank_info(xp)
-        
         cards_count = cards_count if cards_count else 0
         
-        text += f"{medal} *{name}* — {xp} XP\n_{rank_name}_\n🎴 Пилотов собрано: {cards_count} | Точность: {int(avg_acc)}% | Прогнозов: {count}\n\n"
+        text += f"{medal} *{name}* — {xp} XP\n_{rank_name}_ | 🎴 Пилотов: {cards_count}\n\n"
+        kb.inline_keyboard.append([InlineKeyboardButton(text=f"{medal} Профиль: {name}", callback_data=f"show_prof_{uid}")])
         
-    await message.answer(text, parse_mode="Markdown")
+    text += "Нажми на игрока ниже, чтобы посмотреть его гараж!"
+    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith('show_prof_'))
+async def show_other_profile(callback: types.CallbackQuery):
+    target_id = int(callback.data.split('_')[2])
+    text = get_detailed_profile_text(target_id)
+    await callback.message.answer(text, parse_mode="Markdown")
+    await callback.answer()
 
 @dp.message(F.text == '👤 Мой профиль')
 async def process_my_profile(message: types.Message):
     add_user(message.chat.id, message.from_user.first_name)
-    chat_id = message.chat.id
-    
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        user_data = c.execute("SELECT name, xp FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
-        user_name, xp = user_data[0], user_data[1]
-        stats = c.execute("SELECT AVG(accuracy), COUNT(race_id) FROM predictions WHERE chat_id = ? AND scored = 1", (chat_id,)).fetchone()
-        rank_query = c.execute("SELECT COUNT(*) FROM users WHERE xp > (SELECT xp FROM users WHERE chat_id = ?)", (chat_id,)).fetchone()[0]
-        place = rank_query + 1 
-        total_players = c.execute("SELECT COUNT(*) FROM users WHERE xp > 0").fetchone()[0]
-
-    rank_name, next_xp = get_rank_info(xp)
-    
-    text = f"👤 *Профиль: {user_name}*\n\n⚜️ *Звание:* {rank_name}\n✨ *Опыт:* {xp} XP\n"
-    
-    if next_xp: text += f"📈 *До следующего ранга:* {next_xp - xp} XP\n\n"
-    else: text += f"🌟 *Достигнут максимальный ранг!*\n\n"
-    
-    if stats[1] == 0 or stats[0] is None:
-        text += ("📉 *Статистика прогнозов:*\nУ тебя пока нет рассчитанных результатов. Сделай свой первый прогноз!")
-    else:
-        avg_acc = int(stats[0])
-        count = stats[1]
-        text += (f"🎯 *Средняя точность:* {avg_acc}%\n🏁 *Сделано прогнозов:* {count}\n🏆 *Место в рейтинге:* {place} из {max(1, total_players)}\n")
-                 
+    text = get_detailed_profile_text(message.chat.id)
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text == '🔎 Инфо и Профили')
@@ -989,7 +1045,6 @@ async def process_teams(message: types.Message):
 
 @dp.message(Command('alarm'))
 async def cmd_alarm(message: types.Message):
-    # Проверка на то, что команду вызвал именно ты
     if message.from_user.id != 733477024:
         return
         
@@ -1002,7 +1057,7 @@ async def cmd_alarm(message: types.Message):
         try:
             await bot.send_message(user['chat_id'], "Пропишите /start для обновления бота")
             success += 1
-            await asyncio.sleep(0.05) # Защита от спам-лимитов Telegram
+            await asyncio.sleep(0.05) 
         except:
             pass
             
@@ -1014,6 +1069,7 @@ async def main():
     scheduler.add_job(check_schedule_and_notify, 'interval', minutes=5)
     scheduler.add_job(check_race_results, 'interval', minutes=15) 
     scheduler.add_job(check_and_send_news, 'interval', hours=3)
+    scheduler.add_job(check_gacha_reminders, 'interval', minutes=5)
     scheduler.start()
     
     await bot.delete_webhook(drop_pending_updates=True)
