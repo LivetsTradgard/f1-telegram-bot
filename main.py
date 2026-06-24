@@ -1,9 +1,10 @@
 import os
+import time
+import random
 import asyncio
 import aiohttp
 import sqlite3
 import json
-import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -18,7 +19,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
-GEMINI_KEY = os.getenv('GEMINI_API_KEY')
 
 if not TOKEN:
     exit(1)
@@ -29,6 +29,57 @@ dp = Dispatcher()
 API_URL = "https://api.jolpi.ca/ergast/f1"
 DB_PATH = "f1_users.db"
 
+DRIVERS_DB = {
+    "special": [
+        {"id": "schumacher", "name": "Михаэль Шумахер", "emoji": "🇩🇪"},
+        {"id": "senna", "name": "Айртон Сенна", "emoji": "🇧🇷"},
+        {"id": "vettel", "name": "Себастьян Феттель", "emoji": "🇩🇪"},
+        {"id": "prost", "name": "Ален Прост", "emoji": "🇫🇷"},
+        {"id": "raikkonen", "name": "Кими Райкконен", "emoji": "🇫🇮"}
+    ],
+    "legendary": [
+        {"id": "antonelli", "name": "Кими Антонелли", "emoji": "🇮🇹"},
+        {"id": "hamilton", "name": "Льюис Хэмилтон", "emoji": "🇬🇧"},
+        {"id": "verstappen", "name": "Макс Ферстаппен", "emoji": "🇳🇱"}
+    ],
+    "mythic": [
+        {"id": "leclerc", "name": "Шарль Леклер", "emoji": "🇲🇨"},
+        {"id": "alonso", "name": "Фернандо Алонсо", "emoji": "🇪🇸"}
+    ],
+    "epic": [
+        {"id": "russell", "name": "Джордж Расселл", "emoji": "🇬🇧"},
+        {"id": "norris", "name": "Ландо Норрис", "emoji": "🇬🇧"},
+        {"id": "piastri", "name": "Оскар Пиастри", "emoji": "🇦🇺"},
+        {"id": "hadjar", "name": "Исак Хаджар", "emoji": "🇫🇷"}
+    ],
+    "rare": [
+        {"id": "gasly", "name": "Пьер Гасли", "emoji": "🇫🇷"},
+        {"id": "colapinto", "name": "Франко Колапинто", "emoji": "🇦🇷"},
+        {"id": "bearman", "name": "Оливер Берман", "emoji": "🇬🇧"},
+        {"id": "sainz", "name": "Карлос Сайнс", "emoji": "🇪🇸"},
+        {"id": "hulkenberg", "name": "Нико Хюлькенберг", "emoji": "🇩🇪"},
+        {"id": "bortoleto", "name": "Габриэль Бортолето", "emoji": "🇧🇷"},
+        {"id": "perez", "name": "Серхио Перес", "emoji": "🇲🇽"}
+    ],
+    "common": [
+        {"id": "lawson", "name": "Лиам Лоусон", "emoji": "🇳🇿"},
+        {"id": "lindblad", "name": "Арвид Линдблад", "emoji": "🇬🇧"},
+        {"id": "ocon", "name": "Эстебан Окон", "emoji": "🇫🇷"},
+        {"id": "albon", "name": "Александр Албон", "emoji": "🇹🇭"},
+        {"id": "stroll", "name": "Лэнс Стролл", "emoji": "🇨🇦"},
+        {"id": "bottas", "name": "Валттери Боттас", "emoji": "🇫🇮"}
+    ]
+}
+
+RARITY_INFO = {
+    "special": {"name": "✨ ОСОБАЯ", "chance": 0.01},
+    "legendary": {"name": "🟡 ЛЕГЕНДА", "chance": 0.1},
+    "mythic": {"name": "🟣 МИФИК", "chance": 1.0},
+    "epic": {"name": "🔵 ЭПИК", "chance": 4.0},
+    "rare": {"name": "🟢 РЕДКАЯ", "chance": 25.0},
+    "common": {"name": "⚪️ ОБЫЧНАЯ", "chance": 69.89}
+}
+
 class Archive(StatesGroup):
     waiting_for_year = State()
 
@@ -38,31 +89,47 @@ class Predict(StatesGroup):
     waiting_p3 = State()
 
 def get_rank_info(xp):
-    if xp < 200: return ("🏎 Новичок картинга", 200)
-    elif xp < 500: return ("🥉 Пилот Формулы-3", 500)
-    elif xp < 1000: return ("🥈 Пилот Формулы-2", 1000)
-    elif xp < 2000: return ("🥇 Боевой пилот Ф1", 2000)
-    elif xp < 3000: return ("🏆 Претендент на титул", 3000)
-    else: return ("👑 Гроссмейстер пит-уолла", None)
+    ranks = [
+        (50, "🎟 Зритель на трибуне"),
+        (150, "🎫 Гость паддок-клуба"),
+        (300, "🏁 Маршал трассы"),
+        (500, "🔧 Гоночный механик"),
+        (750, "🏎 Пилот картинга"),
+        (1000, "🏆 Чемпион картинга"),
+        (1300, "🥉 Пилот Формулы-4"),
+        (1700, "🥉 Чемпион Формулы-4"),
+        (2200, "🥈 Пилот Формулы-3"),
+        (2800, "🥈 Чемпион Формулы-3"),
+        (3500, "🥇 Пилот Формулы-2"),
+        (4300, "🥇 Чемпион Формулы-2"),
+        (5200, "⏱ Тест-пилот Формулы-1"),
+        (6200, "🏎 Боевой пилот Ф1"),
+        (7300, "⭐️ Лидер команды Ф1"),
+        (8500, "🍾 Завсегдатай подиума"),
+        (10000, "🏆 Победитель Гран-при"),
+        (12000, "🎖 Претендент на титул"),
+        (15000, "👑 Чемпион Мира Ф1")
+    ]
+    
+    for threshold, name in ranks:
+        if xp < threshold:
+            return (name, threshold)
+            
+    return ("🐐 Легенда Автоспорта", None)
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         c.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY)")
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN notify_time INTEGER DEFAULT 60")
-        except sqlite3.OperationalError:
-            pass
-            
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN name TEXT DEFAULT 'Гонщик'")
-        except sqlite3.OperationalError:
-            pass
-            
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN xp INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
+        
+        for col, col_type, default in [("notify_time", "INTEGER", "60"), 
+                                       ("name", "TEXT", "'Гонщик'"), 
+                                       ("xp", "INTEGER", "0"),
+                                       ("last_pull_time", "INTEGER", "0")]:
+            try:
+                c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type} DEFAULT {default}")
+            except sqlite3.OperationalError:
+                pass
             
         c.execute("""CREATE TABLE IF NOT EXISTS predictions (
             chat_id INTEGER,
@@ -80,12 +147,19 @@ def init_db():
             pass
             
         c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-        c.execute("CREATE TABLE IF NOT EXISTS polls (poll_id TEXT PRIMARY KEY, correct_id INTEGER)")
+        
+        c.execute("""CREATE TABLE IF NOT EXISTS inventory (
+            chat_id INTEGER,
+            driver_id TEXT,
+            rarity TEXT,
+            count INTEGER DEFAULT 0,
+            PRIMARY KEY (chat_id, driver_id)
+        )""")
 
 def add_user(chat_id, name=None):
     user_name = name or "Гонщик"
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("INSERT OR IGNORE INTO users (chat_id, notify_time, name, xp) VALUES (?, 60, ?, 0)", (chat_id, user_name))
+        conn.execute("INSERT OR IGNORE INTO users (chat_id, notify_time, name, xp, last_pull_time) VALUES (?, 60, ?, 0, 0)", (chat_id, user_name))
         conn.execute("UPDATE users SET name = ? WHERE chat_id = ?", (user_name, chat_id))
 
 def update_notify_time(chat_id, minutes):
@@ -124,131 +198,6 @@ async def fetch_f1_data(endpoint: str, params: dict = None) -> dict:
 
     return None
 
-async def generate_trivia_question():
-    key = os.getenv('GEMINI_API_KEY', '').strip()
-    if not key:
-        print("Ошибка: API ключ не найден")
-        return None
-        
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "HTTP-Referer": "https://t.me/F1TelegramBot", 
-        "X-Title": "F1 Trivia Bot",
-        "Content-Type": "application/json"
-    }
-    
-    prompt = (
-        "You are a Formula 1 expert. Generate one unique and interesting multiple-choice trivia question "
-        "about Formula 1 history, drivers, teams, or regulations. "
-        "Requirements: The question and all answer options MUST be written in Russian language.\n\n"
-        "You must respond ONLY with a valid JSON object matching this schema:\n"
-        "{\n"
-        '  "question": "The question text in Russian",\n'
-        '  "options": ["Choice 1", "Choice 2", "Choice 3", "Choice 4"],\n'
-        '  "correct_id": 0\n'
-        "}\n\n"
-        "Where 'correct_id' is the integer index (0 to 3) of the right answer.\n"
-        "Do not include any markdown formatting, code blocks (like ```json), or extra text. "
-        "Output only the raw valid JSON string."
-    )
-              
-    payload = {
-        "model": "openrouter/free", 
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1000
-    }
-    
-    try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    text = data['choices'][0]['message'].get('content')
-                    
-                    if not text:
-                        print("API Error: Получен пустой текст ответа.")
-                        return None
-                        
-                    start_idx = text.find('{')
-                    end_idx = text.rfind('}')
-                    
-                    if start_idx != -1 and end_idx != -1:
-                        json_str = text[start_idx:end_idx+1]
-                        try:
-                            return json.loads(json_str)
-                        except json.JSONDecodeError:
-                            print(f"API Error: Ошибка парсинга JSON. Строка: {json_str}")
-                            return None
-                    else:
-                        print(f"API Error: Нейросеть не вернула JSON. Ответ: {text}")
-                        return None
-                else:
-                    error_text = await resp.text() 
-                    print(f"OpenRouter API Error: Статус {resp.status}, Детали: {error_text}")
-                    return None
-    except asyncio.TimeoutError:
-        print("OpenRouter Error: Превышено время ожидания ответа от сервера.")
-        return None
-    except Exception as e:
-        print(f"OpenRouter Exception: {e}")
-    return None
-
-async def send_daily_trivia():
-    quiz_data = None
-    max_attempts = 15
-    
-    for attempt in range(1, max_attempts + 1):
-        try:
-            quiz_data = await generate_trivia_question()
-            if quiz_data:
-                break # Успех
-        except Exception as e:
-            print(f"Попытка {attempt} не удалась: {e}")
-        
-        await asyncio.sleep(60)
-        
-    if not quiz_data:
-        print("Не удалось сгенерировать вопрос после 15 попыток. Викторина сегодня отменяется.")
-        return
-    
-    users = get_user_settings()
-    with sqlite3.connect(DB_PATH) as conn:
-        for user in users:
-            try:
-                msg = await bot.send_poll(
-                    chat_id=user['chat_id'],
-                    question=f"🧠 Вопрос дня:\n{quiz_data['question']}",
-                    options=quiz_data['options'],
-                    type='quiz',
-                    correct_option_id=quiz_data['correct_id'],
-                    is_anonymous=False 
-                )
-                conn.execute("INSERT INTO polls (poll_id, correct_id) VALUES (?, ?)", (msg.poll.id, quiz_data['correct_id']))
-            except Exception as e:
-                print(f"Не удалось отправить вопрос пользователю {user['chat_id']}: {e}")
-
-@dp.poll_answer()
-async def handle_poll_answer(poll_answer: types.PollAnswer):
-    user_id = poll_answer.user.id
-    selected_option = poll_answer.option_ids[0]
-    
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        row = c.execute("SELECT correct_id FROM polls WHERE poll_id = ?", (poll_answer.poll_id,)).fetchone()
-        
-        if row:
-            if row[0] == selected_option:
-                c.execute("UPDATE users SET xp = xp + 10 WHERE chat_id = ?", (user_id,))
-                try:
-                    await bot.send_message(user_id, "✅ Блестящий ответ! Вы заработали +10 XP!")
-                except: pass
-            else:
-                try:
-                    await bot.send_message(user_id, "❌ Увы, интуиция подвела. В следующий раз повезет!")
-                except: pass
-
 async def check_and_send_news():
     url = "https://www.f1news.ru/export/news.xml"
     try:
@@ -259,7 +208,6 @@ async def check_and_send_news():
                     root = ET.fromstring(xml_data)
                     item = root.find('.//item')
                     
-                    # Исправлено предупреждение DeprecationWarning
                     if item is None: return
                     
                     title = item.find('title').text
@@ -290,7 +238,7 @@ def get_weather_emoji(code):
     return "🌡"
 
 async def fetch_weather(lat: float, lon: float, target_date_str: str = None) -> dict:
-    url = "[https://api.open-meteo.com/v1/forecast](https://api.open-meteo.com/v1/forecast)"
+    url = "https://api.open-meteo.com/v1/forecast"
     try:
         if not target_date_str:
             params = {"latitude": lat, "longitude": lon, "current_weather": "true"}
@@ -328,7 +276,8 @@ def get_reply_keyboard():
         [KeyboardButton(text="🏆 Личный зачет"), KeyboardButton(text="🏎 Кубок конструкторов")],
         [KeyboardButton(text="🔎 Инфо и Профили"), KeyboardButton(text="📜 Архив сезонов")],
         [KeyboardButton(text="🔮 Прогнозы на подиум"), KeyboardButton(text="📊 Рейтинг игроков")],
-        [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="⚙️ Настройки")]
+        [KeyboardButton(text="🎴 Гараж"), KeyboardButton(text="👤 Мой профиль")],
+        [KeyboardButton(text="⚙️ Настройки")]
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -361,8 +310,7 @@ def extract_all_sessions(race_data: dict) -> list:
 
 async def check_schedule_and_notify():
     data = await fetch_f1_data("current/next")
-    if not data:
-        return
+    if not data: return
 
     try:
         race = data['MRData']['RaceTable']['Races'][0]
@@ -372,8 +320,7 @@ async def check_schedule_and_notify():
         users = get_user_settings()
         
         for sess in sessions:
-            if not sess['date'] or not sess['time']:
-                continue
+            if not sess['date'] or not sess['time']: continue
                 
             dt_utc = datetime.strptime(f"{sess['date']} {sess['time']}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
             delta_minutes = (dt_utc - now_utc).total_seconds() / 60
@@ -385,13 +332,11 @@ async def check_schedule_and_notify():
                            f"чтобы проверить свою интуицию!")
                     try:
                         await bot.send_message(user['chat_id'], msg)
-                    except:
-                        pass
+                    except: pass
         
             for user in users:
                 offset = user['notify_time']
-                if offset == 0:
-                    continue
+                if offset == 0: continue
                     
                 if offset - 5 < delta_minutes <= offset:
                     dt_moscow = dt_utc.astimezone(ZoneInfo("Europe/Moscow")).strftime("%H:%M")
@@ -402,10 +347,8 @@ async def check_schedule_and_notify():
                     msg = f"🔔 *Напоминание!*\n\n{sess['name']} в рамках {race_name} начнется {time_str} (в {dt_moscow} по Мск)!"
                     try:
                         await bot.send_message(user['chat_id'], msg, parse_mode="Markdown")
-                    except:
-                        pass
-    except Exception:
-        pass
+                    except: pass
+    except Exception: pass
 
 async def check_race_results():
     data = await fetch_f1_data("current/last/results")
@@ -433,10 +376,8 @@ async def check_race_results():
                 score = 0.0
                 
                 for i in range(3):
-                    if pred_podium[i] == actual_podium[i]:
-                        score += 33.34
-                    elif pred_podium[i] in actual_podium:
-                        score += 16.67
+                    if pred_podium[i] == actual_podium[i]: score += 33.34
+                    elif pred_podium[i] in actual_podium: score += 16.67
                         
                 percent = round(score)
                 if percent >= 99: percent = 100
@@ -457,15 +398,12 @@ async def check_race_results():
                        f"🎯 *Точность твоего прогноза: {percent}%*\n"
                        f"✨ *Получено опыта:* +{earned_xp} XP")
                 
-                try:
-                    await bot.send_message(chat_id, msg, parse_mode="Markdown")
-                except:
-                    pass
+                try: await bot.send_message(chat_id, msg, parse_mode="Markdown")
+                except: pass
                 
                 conn.execute("UPDATE predictions SET scored = 1, accuracy = ? WHERE chat_id = ? AND race_id = ?", (percent, chat_id, race_id))
                 conn.execute("UPDATE users SET xp = xp + ? WHERE chat_id = ?", (earned_xp, chat_id))
-    except Exception as e:
-        print(f"Results scoring error: {e}")
+    except Exception as e: print(f"Results scoring error: {e}")
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -475,39 +413,121 @@ async def cmd_start(message: types.Message):
                     f"Используй кнопки внизу для навигации!")
     await message.answer(welcome_text, reply_markup=get_reply_keyboard())
 
-@dp.message(Command('quiz'))
-async def force_quiz(message: types.Message):
-    if message.from_user.id != 733477024:
-        return
-        
-    tmp_msg = await message.answer("🔄 Генерирую тестовый вопрос...")
-    
-    quiz_data = await generate_trivia_question()
-    if not quiz_data:
-        await tmp_msg.edit_text("❌ Ошибка при генерации вопроса.")
-        return
-        
-    try:
-        poll_msg = await bot.send_poll(
-            chat_id=message.chat.id,
-            question=f"🧠 Вопрос дня:\n{quiz_data['question']}",
-            options=quiz_data['options'],
-            type='quiz',
-            correct_option_id=quiz_data['correct_id'],
-            is_anonymous=False 
-        )
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("INSERT INTO polls (poll_id, correct_id) VALUES (?, ?)", (poll_msg.poll.id, quiz_data['correct_id']))
-        await tmp_msg.delete()
-    except Exception as e:
-        print(f"Ошибка тестовой отправки: {e}")
-        await tmp_msg.edit_text("❌ Ошибка отправки опроса в Телеграм.")
-
 @dp.message(Command('news'))
 async def force_news(message: types.Message):
-    if message.from_user.id != 733477024:
-        return
+    if message.from_user.id != 733477024: return
     await check_and_send_news()
+
+
+def get_gacha_text_and_kb(chat_id: int):
+    total_drivers = sum(len(cat) for cat in DRIVERS_DB.values())
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        count = c.execute("SELECT SUM(count) FROM inventory WHERE chat_id = ?", (chat_id,)).fetchone()[0] or 0
+        unique = c.execute("SELECT COUNT(*) FROM inventory WHERE chat_id = ?", (chat_id,)).fetchone()[0] or 0
+        cards = c.execute("SELECT driver_id, rarity, count FROM inventory WHERE chat_id = ? ORDER BY count DESC", (chat_id,)).fetchall()
+        
+    text = (f"🎴 *Твой гараж*\n\n"
+            f"Прогресс коллекции: {unique} из {total_drivers} пилотов\n"
+            f"Всего карточек: {count}\n\n")
+            
+    if not cards:
+        text += "_Твоя коллекция пока пуста. Нажми «Открыть», чтобы получить первого пилота!_\n"
+    else:
+        text += "*Текущая коллекция:*\n"
+        collection = {"special": [], "legendary": [], "mythic": [], "epic": [], "rare": [], "common": []}
+        all_drivers = {d['id']: d for category in DRIVERS_DB.values() for d in category}
+        
+        for d_id, rarity, cnt in cards:
+            if d_id in all_drivers:
+                collection[rarity].append((all_drivers[d_id], cnt))
+                
+        for rarity in ["special", "legendary", "mythic", "epic", "rare", "common"]:
+            if collection[rarity]:
+                text += f"{RARITY_INFO[rarity]['name']}:\n"
+                for driver, cnt in collection[rarity]:
+                    cnt_str = f" x{cnt}" if cnt > 1 else ""
+                    text += f"  {driver['emoji']} {driver['name']}{cnt_str}\n"
+                text += "\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 Открыть", callback_data="pull_card")]
+    ])
+    
+    return text, kb
+
+@dp.message(F.text == '🎴 Гараж')
+async def gacha_menu(message: types.Message):
+    add_user(message.chat.id, message.from_user.first_name)
+    text, kb = get_gacha_text_and_kb(message.chat.id)
+    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+
+@dp.callback_query(F.data == 'pull_card')
+async def pull_new_card(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    now = int(time.time())
+    cooldown = 6 * 3600
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        last_pull = c.execute("SELECT last_pull_time FROM users WHERE chat_id = ?", (chat_id,)).fetchone()[0]
+        
+        if now - last_pull < cooldown:
+            rem = cooldown - (now - last_pull)
+            h = rem // 3600
+            m = (rem % 3600) // 60
+            await callback.answer(f"⏳ Следующее открытие будет доступно через {h} ч. {m} мин.", show_alert=True)
+            return
+            
+        roll = random.uniform(0, 100)
+        
+        if roll <= 0.01: rarity = "special"
+        elif roll <= 0.11: rarity = "legendary"   
+        elif roll <= 1.11: rarity = "mythic"     
+        elif roll <= 5.11: rarity = "epic"       
+        elif roll <= 30.11: rarity = "rare"      
+        else: rarity = "common"                 
+        
+        driver = random.choice(DRIVERS_DB[rarity])
+        
+        c.execute("SELECT count FROM inventory WHERE chat_id = ? AND driver_id = ?", (chat_id, driver['id']))
+        existing_card = c.fetchone()
+        
+        is_duplicate = False
+        if existing_card:
+            is_duplicate = True
+            # Начисляем +15 XP за дубликат
+            c.execute("UPDATE users SET xp = xp + 15 WHERE chat_id = ?", (chat_id,))
+        
+        c.execute("""
+            INSERT INTO inventory (chat_id, driver_id, rarity, count) 
+            VALUES (?, ?, ?, 1) 
+            ON CONFLICT(chat_id, driver_id) 
+            DO UPDATE SET count = count + 1
+        """, (chat_id, driver['id'], rarity))
+        
+        c.execute("UPDATE users SET last_pull_time = ? WHERE chat_id = ?", (now, chat_id))
+
+    rarity_name = RARITY_INFO[rarity]['name']
+    
+    if is_duplicate:
+        msg = f"Выпал {rarity_name} {driver['name']} *(Дубликат! ✨ +15 XP)*\nСледующее открытие будет доступно через 6 часов."
+    else:
+        msg = f"Выпал {rarity_name} {driver['name']} 🎉\nСледующее открытие будет доступно через 6 часов."
+           
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад в Гараж", callback_data="back_to_gacha")]
+    ])
+    
+    await callback.message.edit_text(msg, parse_mode="Markdown", reply_markup=kb)
+
+@dp.callback_query(F.data == 'back_to_gacha')
+async def back_to_gacha(callback: types.CallbackQuery):
+    text, kb = get_gacha_text_and_kb(callback.message.chat.id)
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    await callback.answer()
+
 
 def generate_drivers_kb(drivers_list: list, exclude: list = None) -> InlineKeyboardMarkup:
     if exclude is None: exclude = []
@@ -528,8 +548,7 @@ async def start_prediction(message: types.Message, state: FSMContext):
     tmp_msg = await message.answer("🔄 Загружаю данные следующей гонки...")
     
     next_race_data = await fetch_f1_data("current/next")
-    if not next_race_data:
-        return await tmp_msg.edit_text("❌ Ошибка соединения с API.")
+    if not next_race_data: return await tmp_msg.edit_text("❌ Ошибка соединения с API.")
         
     try:
         race = next_race_data['MRData']['RaceTable']['Races'][0]
@@ -540,8 +559,7 @@ async def start_prediction(message: types.Message, state: FSMContext):
             c = conn.cursor()
             existing = c.execute("SELECT p1, p2, p3 FROM predictions WHERE chat_id = ? AND race_id = ?", (message.chat.id, race_id)).fetchone()
             
-        if existing:
-            return await tmp_msg.edit_text(f"✅ Ты уже сделал прогноз на {race_name}!\nЖди завершения гонки для подсчета очков.")
+        if existing: return await tmp_msg.edit_text(f"✅ Ты уже сделал прогноз на {race_name}!\nЖди завершения гонки для подсчета очков.")
             
         drivers_data = await fetch_f1_data("current/driverStandings", params={"limit": 100})
         raw_drivers = drivers_data['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
@@ -552,8 +570,7 @@ async def start_prediction(message: types.Message, state: FSMContext):
         
         kb = generate_drivers_kb(drivers_list)
         await tmp_msg.edit_text(f"🔮 *Прогноз на {race_name}*\n\n🥇 Выбери гонщика, который займет **ПЕРВОЕ** место:", parse_mode="Markdown", reply_markup=kb)
-    except Exception:
-        await tmp_msg.edit_text("❌ Ошибка формирования прогноза.")
+    except Exception: await tmp_msg.edit_text("❌ Ошибка формирования прогноза.")
 
 @dp.callback_query(F.data == 'pred_cancel')
 async def cancel_prediction(callback: types.CallbackQuery, state: FSMContext):
@@ -567,8 +584,7 @@ async def process_prediction_step(callback: types.CallbackQuery, state: FSMConte
     current_state = await state.get_state()
     data = await state.get_data()
     
-    if not current_state:
-        return await callback.answer("Сессия устарела. Начни заново.", show_alert=True)
+    if not current_state: return await callback.answer("Сессия устарела. Начни заново.", show_alert=True)
         
     selected = data.get('selected', [])
     selected.append(driver_id)
@@ -620,8 +636,7 @@ async def process_leaderboard(message: types.Message):
             LIMIT 10
         """).fetchall()
         
-    if not data:
-        return await message.answer("📊 *Рейтинг пока пуст.*\nДождитесь расчета первых прогнозов после гонки!", parse_mode="Markdown")
+    if not data: return await message.answer("📊 *Рейтинг пока пуст.*\nДождитесь расчета первых прогнозов после гонки!", parse_mode="Markdown")
         
     text = "📊 *Глобальный рейтинг (Топ-10):*\n\n"
     for i, (name, xp, avg_acc, count) in enumerate(data):
@@ -640,33 +655,24 @@ async def process_my_profile(message: types.Message):
         c = conn.cursor()
         user_data = c.execute("SELECT name, xp FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
         user_name, xp = user_data[0], user_data[1]
-        
         stats = c.execute("SELECT AVG(accuracy), COUNT(race_id) FROM predictions WHERE chat_id = ? AND scored = 1", (chat_id,)).fetchone()
-        
         rank_query = c.execute("SELECT COUNT(*) FROM users WHERE xp > (SELECT xp FROM users WHERE chat_id = ?)", (chat_id,)).fetchone()[0]
         place = rank_query + 1 
         total_players = c.execute("SELECT COUNT(*) FROM users WHERE xp > 0").fetchone()[0]
 
     rank_name, next_xp = get_rank_info(xp)
     
-    text = f"👤 *Профиль: {user_name}*\n\n"
-    text += f"⚜️ *Звание:* {rank_name}\n"
-    text += f"✨ *Опыт:* {xp} XP\n"
+    text = f"👤 *Профиль: {user_name}*\n\n⚜️ *Звание:* {rank_name}\n✨ *Опыт:* {xp} XP\n"
     
-    if next_xp:
-        text += f"📈 *До следующего ранга:* {next_xp - xp} XP\n\n"
-    else:
-        text += f"🌟 *Достигнут максимальный ранг!*\n\n"
+    if next_xp: text += f"📈 *До следующего ранга:* {next_xp - xp} XP\n\n"
+    else: text += f"🌟 *Достигнут максимальный ранг!*\n\n"
     
     if stats[1] == 0 or stats[0] is None:
-        text += ("📉 *Статистика прогнозов:*\n"
-                 "У тебя пока нет рассчитанных результатов. Сделай свой первый прогноз!")
+        text += ("📉 *Статистика прогнозов:*\nУ тебя пока нет рассчитанных результатов. Сделай свой первый прогноз!")
     else:
         avg_acc = int(stats[0])
         count = stats[1]
-        text += (f"🎯 *Средняя точность:* {avg_acc}%\n"
-                 f"🏁 *Сделано прогнозов:* {count}\n"
-                 f"🏆 *Место в рейтинге:* {place} из {max(1, total_players)}\n")
+        text += (f"🎯 *Средняя точность:* {avg_acc}%\n🏁 *Сделано прогнозов:* {count}\n🏆 *Место в рейтинге:* {place} из {max(1, total_players)}\n")
                  
     await message.answer(text, parse_mode="Markdown")
 
@@ -768,7 +774,6 @@ async def process_archive_year(message: types.Message, state: FSMContext):
     await state.clear()
     
     tmp_msg = await message.answer(f"🔄 Поднимаю архивы за {year_str} год...")
-    
     driver_data = await fetch_f1_data(f"{year_str}/driverStandings", params={"limit": 10})
     team_data = await fetch_f1_data(f"{year_str}/constructorStandings", params={"limit": 3}) if int(year_str) >= 1958 else None
     
@@ -794,10 +799,8 @@ async def process_archive_year(message: types.Message, state: FSMContext):
             name = f"{d['Driver']['givenName']} {d['Driver']['familyName']}"
             team = d['Constructors'][0]['name'] if d.get('Constructors') else "Неизвестно"
             pts = d['points']
-            if i == 0: 
-                text += f"👑 *Чемпион:* {name} ({team}) — {pts} очков\n"
-            else: 
-                text += f"{i+1}. {name} ({team}) — {pts} очков\n"
+            if i == 0: text += f"👑 *Чемпион:* {name} ({team}) — {pts} очков\n"
+            else: text += f"{i+1}. {name} ({team}) — {pts} очков\n"
                 
         await tmp_msg.delete()
         await message.answer(text, parse_mode="Markdown", reply_markup=get_reply_keyboard())
@@ -895,8 +898,7 @@ async def process_last_race(message: types.Message):
 @dp.callback_query(F.data == 'last_race_pits')
 async def process_last_pits(callback: types.CallbackQuery):
     data = await fetch_f1_data("current/last/pitstops", params={"limit": 100})
-    if not data:
-        return await callback.answer("Данные недоступны", show_alert=True)
+    if not data: return await callback.answer("Данные недоступны", show_alert=True)
     try:
         pits = data['MRData']['RaceTable']['Races'][0]['PitStops']
         valid_pits = [p for p in pits if ':' not in p['duration']]
@@ -909,29 +911,24 @@ async def process_last_pits(callback: types.CallbackQuery):
             
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К результатам гонки", callback_data="last_race_back")]])
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
-    except Exception:
-        await callback.answer("Ошибка парсинга пит-стопов.", show_alert=True)
+    except Exception: await callback.answer("Ошибка парсинга пит-стопов.", show_alert=True)
 
 @dp.callback_query(F.data == 'last_race_dnfs')
 async def process_last_dnfs(callback: types.CallbackQuery):
     data = await fetch_f1_data("current/last/results", params={"limit": 100})
-    if not data:
-        return await callback.answer("Данные недоступны", show_alert=True)
+    if not data: return await callback.answer("Данные недоступны", show_alert=True)
     try:
         results = data['MRData']['RaceTable']['Races'][0]['Results']
         dnfs = [r for r in results if r['status'] not in ['Finished'] and not r['status'].startswith('+')]
         
-        if not dnfs:
-            text = "❌ *Сходов нет!* Все болиды добрались до финиша."
+        if not dnfs: text = "❌ *Сходов нет!* Все болиды добрались до финиша."
         else:
             text = "❌ *Сходы в гонке:*\n\n"
-            for d in dnfs:
-                text += f"• {d['Driver']['familyName']} ({d['Constructor']['name']}) — {d['status']}\n"
+            for d in dnfs: text += f"• {d['Driver']['familyName']} ({d['Constructor']['name']}) — {d['status']}\n"
                 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ К результатам гонки", callback_data="last_race_back")]])
         await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
-    except Exception:
-        await callback.answer("Ошибка парсинга сходов.", show_alert=True)
+    except Exception: await callback.answer("Ошибка парсинга сходов.", show_alert=True)
 
 @dp.callback_query(F.data == 'last_race_back')
 async def process_last_race_back(callback: types.CallbackQuery):
@@ -978,12 +975,10 @@ async def process_teams(message: types.Message):
 
 async def main():
     init_db()
-    
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_schedule_and_notify, 'interval', minutes=5)
     scheduler.add_job(check_race_results, 'interval', minutes=15) 
     scheduler.add_job(check_and_send_news, 'interval', hours=3)
-    scheduler.add_job(send_daily_trivia, 'cron', hour=12, minute=14, timezone=ZoneInfo("Europe/Moscow"))
     scheduler.start()
     
     await bot.delete_webhook(drop_pending_updates=True)
