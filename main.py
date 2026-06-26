@@ -162,6 +162,7 @@ def init_db():
                                        ("legendary_pity", "REAL", "0.0"),
                                        ("mythic_pity", "REAL", "0.0"),
                                        ("epic_pity", "REAL", "0.0"),
+                                       ("total_pulls", "INTEGER", "0"),
                                        ("reminded", "INTEGER", "0")]:
             try:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type} DEFAULT {default}")
@@ -480,13 +481,26 @@ def get_gacha_text_and_kb(chat_id: int):
     
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
+        
+        try:
+            pulls_data = c.execute("SELECT total_pulls FROM users WHERE chat_id = ?").fetchone()
+            total_pulls = pulls_data[0] if pulls_data and pulls_data[0] is not None else 0
+        except sqlite3.OperationalError:
+            total_pulls = 0
+            
         count = c.execute("SELECT SUM(count) FROM inventory WHERE chat_id = ?", (chat_id,)).fetchone()[0] or 0
         unique = c.execute("SELECT COUNT(*) FROM inventory WHERE chat_id = ?", (chat_id,)).fetchone()[0] or 0
         cards = c.execute("SELECT driver_id, rarity, count FROM inventory WHERE chat_id = ? ORDER BY count DESC", (chat_id,)).fetchall()
         
+    next_leg = 70 - (total_pulls % 70)
+    next_spec = 140 - (total_pulls % 140)
+        
     text = (f"🎴 *Твой гараж*\n\n"
             f"Прогресс коллекции: {unique} из {total_drivers} пилотов\n"
-            f"Всего карточек: {count}\n\n")
+            f"Всего карточек: {count}\n"
+            f"🔄 Открыто паков: {total_pulls}\n\n"
+            f"🟡 Гарант на Легенду через: {next_leg}\n"
+            f"✨ Гарант на Особую через: {next_spec}\n\n")
             
     if not cards:
         text += "_Твоя коллекция пока пуста. Нажми «Открыть», чтобы получить первого пилота!_\n"
@@ -527,8 +541,19 @@ async def pull_new_card(callback: types.CallbackQuery):
     
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
-        user_data = c.execute("SELECT last_pull_time, special_pity, legendary_pity, mythic_pity, epic_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
-        last_pull, sp_pity, leg_pity, myth_pity, epic_pity = user_data
+        try:
+            user_data = c.execute("SELECT last_pull_time, special_pity, legendary_pity, mythic_pity, epic_pity, total_pulls FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        except sqlite3.OperationalError:
+            # На случай, если кто-то нажмет кнопку до того, как база обновится
+            user_data = c.execute("SELECT last_pull_time, special_pity, legendary_pity, mythic_pity, epic_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+            user_data = (*user_data, 0)
+            
+        last_pull = user_data[0]
+        sp_pity = user_data[1]
+        leg_pity = user_data[2]
+        myth_pity = user_data[3]
+        epic_pity = user_data[4]
+        total_pulls = user_data[5] if user_data[5] is not None else 0
         
         if now - last_pull < cooldown:
             rem = cooldown - (now - last_pull)
@@ -537,45 +562,58 @@ async def pull_new_card(callback: types.CallbackQuery):
             await callback.answer(f"⏳ Следующее открытие будет доступно через {h} ч. {m} мин.", show_alert=True)
             return
             
-        sp_chance = 0.01 + sp_pity
-        leg_chance = 0.1 + leg_pity
-        myth_chance = 1.0 + myth_pity
-        epic_chance = 4.0 + epic_pity
+        total_pulls += 1
+        is_hard_pity = False
         
-        roll = random.uniform(0, 100)
-        
-        if roll <= sp_chance:
+        # Проверяем жесткий гарант
+        if total_pulls % 140 == 0:
             rarity = "special"
-            new_sp_pity = 0.0 
-            new_leg_pity = leg_pity + 0.05 
-            new_myth_pity = myth_pity + 0.1
-            new_epic_pity = epic_pity + 0.2
-        elif roll <= sp_chance + leg_chance:
+            is_hard_pity = True
+            new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity, leg_pity, myth_pity, epic_pity
+        elif total_pulls % 70 == 0:
             rarity = "legendary"
-            new_sp_pity = sp_pity + 0.01
-            new_leg_pity = 0.0 
-            new_myth_pity = myth_pity + 0.1
-            new_epic_pity = epic_pity + 0.2
-        elif roll <= sp_chance + leg_chance + myth_chance:
-            rarity = "mythic"
-            new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
-            new_myth_pity = 0.0
-            new_epic_pity = epic_pity + 0.2
-        elif roll <= sp_chance + leg_chance + myth_chance + epic_chance:
-            rarity = "epic"
-            new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
-            new_myth_pity = myth_pity + 0.1
-            new_epic_pity = 0.0
-        elif roll <= sp_chance + leg_chance + myth_chance + epic_chance + 25.0:
-            rarity = "rare"
-            new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
-            new_myth_pity = myth_pity + 0.1
-            new_epic_pity = epic_pity + 0.2
+            is_hard_pity = True
+            new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity, leg_pity, myth_pity, epic_pity
         else:
-            rarity = "common"
-            new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
-            new_myth_pity = myth_pity + 0.1
-            new_epic_pity = epic_pity + 0.2
+            sp_chance = 0.01 + sp_pity
+            leg_chance = 0.1 + leg_pity
+            myth_chance = 1.0 + myth_pity
+            epic_chance = 4.0 + epic_pity
+            
+            roll = random.uniform(0, 100)
+            
+            if roll <= sp_chance:
+                rarity = "special"
+                new_sp_pity = 0.0 
+                new_leg_pity = leg_pity + 0.05 
+                new_myth_pity = myth_pity + 0.1
+                new_epic_pity = epic_pity + 0.2
+            elif roll <= sp_chance + leg_chance:
+                rarity = "legendary"
+                new_sp_pity = sp_pity + 0.01
+                new_leg_pity = 0.0 
+                new_myth_pity = myth_pity + 0.1
+                new_epic_pity = epic_pity + 0.2
+            elif roll <= sp_chance + leg_chance + myth_chance:
+                rarity = "mythic"
+                new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
+                new_myth_pity = 0.0
+                new_epic_pity = epic_pity + 0.2
+            elif roll <= sp_chance + leg_chance + myth_chance + epic_chance:
+                rarity = "epic"
+                new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
+                new_myth_pity = myth_pity + 0.1
+                new_epic_pity = 0.0
+            elif roll <= sp_chance + leg_chance + myth_chance + epic_chance + 25.0:
+                rarity = "rare"
+                new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
+                new_myth_pity = myth_pity + 0.1
+                new_epic_pity = epic_pity + 0.2
+            else:
+                rarity = "common"
+                new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
+                new_myth_pity = myth_pity + 0.1
+                new_epic_pity = epic_pity + 0.2
         
         driver = random.choice(DRIVERS_DB[rarity])
         c.execute("SELECT count FROM inventory WHERE chat_id = ? AND driver_id = ?", (chat_id, driver['id']))
@@ -595,11 +633,17 @@ async def pull_new_card(callback: types.CallbackQuery):
             ON CONFLICT(chat_id, driver_id) DO UPDATE SET count = count + 1
         """, (chat_id, driver['id'], rarity))
         
-        c.execute("UPDATE users SET last_pull_time = ?, special_pity = ?, legendary_pity = ?, mythic_pity = ?, epic_pity = ?, reminded = 0 WHERE chat_id = ?", 
-                  (now, new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity, chat_id))
+        try:
+            c.execute("UPDATE users SET last_pull_time = ?, special_pity = ?, legendary_pity = ?, mythic_pity = ?, epic_pity = ?, total_pulls = ?, reminded = 0 WHERE chat_id = ?", 
+                      (now, new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity, total_pulls, chat_id))
+        except sqlite3.OperationalError:
+            # Если база еще не обновилась
+            c.execute("UPDATE users SET last_pull_time = ?, special_pity = ?, legendary_pity = ?, mythic_pity = ?, epic_pity = ?, reminded = 0 WHERE chat_id = ?", 
+                      (now, new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity, chat_id))
 
     rarity_name = RARITY_INFO[rarity]['name']
-    msg = f"Выпал {rarity_name} {driver['name']} " + ("*(Дубликат! ✨ +{} XP)*".format(reward) if is_duplicate else "🎉")
+    prefix = "🛡 *ГАРАНТ!*\n" if is_hard_pity else ""
+    msg = f"{prefix}Выпал {rarity_name} {driver['name']} " + ("*(Дубликат! ✨ +{} XP)*".format(reward) if is_duplicate else "🎉")
     msg += "\nСледующее открытие будет доступно через 6 часов."
            
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в Гараж", callback_data="back_to_gacha")]])
