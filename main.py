@@ -71,7 +71,7 @@ DRIVERS_DB = {
         {"id": "sainz", "name": "Карлос Сайнс", "emoji": "🇪🇸"},
         {"id": "hulkenberg", "name": "Нико Хюлькенберг", "emoji": "🇩🇪"},
         {"id": "bortoleto", "name": "Габриэль Бортолето", "emoji": "🇧🇷"},
-        {"id": "perez", "name": "Серхио Перес", "emoji": "🇲🇽"}
+        {"id": "perez", "name": "Серхио Перес", "emoji": "🇲🇽"},
         {"id": "ricciardo", "name": "Даниэль Риккардо", "emoji": "🇦🇺"},
         {"id": "massa", "name": "Фелипе Масса", "emoji": "🇧🇷"},
         {"id": "barrichello", "name": "Рубенс Баррикелло", "emoji": "🇧🇷"},
@@ -84,7 +84,7 @@ DRIVERS_DB = {
         {"id": "ocon", "name": "Эстебан Окон", "emoji": "🇫🇷"},
         {"id": "albon", "name": "Александр Албон", "emoji": "🇹🇭"},
         {"id": "stroll", "name": "Лэнс Стролл", "emoji": "🇨🇦"},
-        {"id": "bottas", "name": "Валттери Боттас", "emoji": "🇫🇮"}
+        {"id": "bottas", "name": "Валттери Боттас", "emoji": "🇫🇮"},
         {"id": "tsunoda", "name": "Юки Цунода", "emoji": "🇯🇵"},
         {"id": "magnussen", "name": "Кевин Магнуссен", "emoji": "🇩🇰"},
         {"id": "zhou", "name": "Чжоу Гуаньюй", "emoji": "🇨🇳"},
@@ -92,7 +92,7 @@ DRIVERS_DB = {
         {"id": "latifi", "name": "Николас Латифи", "emoji": "🇨🇦"},
         {"id": "kvyat", "name": "Даниил Квят", "emoji": "🇷🇺"},
         {"id": "kubica", "name": "Роберт Кубица", "emoji": "🇵🇱"},
-        {"id": "mick", "name": "Мик Шумахер", "emoji": "🇩🇪"}
+        {"id": "mick", "name": "Мик Шумахер", "emoji": "🇩🇪"},
         {"id": "mazepin", "name": "Никита Мазепин", "emoji": "🇷🇺"},
         {"id": "maldonado", "name": "Пастор Мальдонадо", "emoji": "🇻🇪"},
         {"id": "grosjean", "name": "Ромен Грожан", "emoji": "🇫🇷"},
