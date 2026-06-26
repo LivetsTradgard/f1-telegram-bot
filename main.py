@@ -160,6 +160,8 @@ def init_db():
                                        ("last_pull_time", "INTEGER", "0"),
                                        ("special_pity", "REAL", "0.0"),
                                        ("legendary_pity", "REAL", "0.0"),
+                                       ("mythic_pity", "REAL", "0.0"),
+                                       ("epic_pity", "REAL", "0.0"),
                                        ("reminded", "INTEGER", "0")]:
             try:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type} DEFAULT {default}")
@@ -525,8 +527,8 @@ async def pull_new_card(callback: types.CallbackQuery):
     
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
-        user_data = c.execute("SELECT last_pull_time, special_pity, legendary_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
-        last_pull, sp_pity, leg_pity = user_data
+        user_data = c.execute("SELECT last_pull_time, special_pity, legendary_pity, mythic_pity, epic_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        last_pull, sp_pity, leg_pity, myth_pity, epic_pity = user_data
         
         if now - last_pull < cooldown:
             rem = cooldown - (now - last_pull)
@@ -537,6 +539,8 @@ async def pull_new_card(callback: types.CallbackQuery):
             
         sp_chance = 0.01 + sp_pity
         leg_chance = 0.1 + leg_pity
+        myth_chance = 1.0 + myth_pity
+        epic_chance = 4.0 + epic_pity
         
         roll = random.uniform(0, 100)
         
@@ -544,22 +548,34 @@ async def pull_new_card(callback: types.CallbackQuery):
             rarity = "special"
             new_sp_pity = 0.0 
             new_leg_pity = leg_pity + 0.05 
+            new_myth_pity = myth_pity + 0.1
+            new_epic_pity = epic_pity + 0.2
         elif roll <= sp_chance + leg_chance:
             rarity = "legendary"
             new_sp_pity = sp_pity + 0.01
             new_leg_pity = 0.0 
-        elif roll <= sp_chance + leg_chance + 1.0:
+            new_myth_pity = myth_pity + 0.1
+            new_epic_pity = epic_pity + 0.2
+        elif roll <= sp_chance + leg_chance + myth_chance:
             rarity = "mythic"
             new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
-        elif roll <= sp_chance + leg_chance + 1.0 + 4.0:
+            new_myth_pity = 0.0
+            new_epic_pity = epic_pity + 0.2
+        elif roll <= sp_chance + leg_chance + myth_chance + epic_chance:
             rarity = "epic"
             new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
-        elif roll <= sp_chance + leg_chance + 1.0 + 4.0 + 25.0:
+            new_myth_pity = myth_pity + 0.1
+            new_epic_pity = 0.0
+        elif roll <= sp_chance + leg_chance + myth_chance + epic_chance + 25.0:
             rarity = "rare"
             new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
+            new_myth_pity = myth_pity + 0.1
+            new_epic_pity = epic_pity + 0.2
         else:
             rarity = "common"
             new_sp_pity, new_leg_pity = sp_pity + 0.01, leg_pity + 0.05
+            new_myth_pity = myth_pity + 0.1
+            new_epic_pity = epic_pity + 0.2
         
         driver = random.choice(DRIVERS_DB[rarity])
         c.execute("SELECT count FROM inventory WHERE chat_id = ? AND driver_id = ?", (chat_id, driver['id']))
@@ -579,8 +595,8 @@ async def pull_new_card(callback: types.CallbackQuery):
             ON CONFLICT(chat_id, driver_id) DO UPDATE SET count = count + 1
         """, (chat_id, driver['id'], rarity))
         
-        c.execute("UPDATE users SET last_pull_time = ?, special_pity = ?, legendary_pity = ?, reminded = 0 WHERE chat_id = ?", 
-                  (now, new_sp_pity, new_leg_pity, chat_id))
+        c.execute("UPDATE users SET last_pull_time = ?, special_pity = ?, legendary_pity = ?, mythic_pity = ?, epic_pity = ?, reminded = 0 WHERE chat_id = ?", 
+                  (now, new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity, chat_id))
 
     rarity_name = RARITY_INFO[rarity]['name']
     msg = f"Выпал {rarity_name} {driver['name']} " + ("*(Дубликат! ✨ +{} XP)*".format(reward) if is_duplicate else "🎉")
@@ -690,9 +706,9 @@ async def process_prediction_step(callback: types.CallbackQuery, state: FSMConte
 def get_detailed_profile_text(chat_id):
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
-        user_data = c.execute("SELECT name, xp, special_pity, legendary_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        user_data = c.execute("SELECT name, xp, special_pity, legendary_pity, mythic_pity, epic_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
         if not user_data: return "Пользователь не найден."
-        user_name, xp, sp_pity, leg_pity = user_data
+        user_name, xp, sp_pity, leg_pity, myth_pity, epic_pity = user_data
         
         stats = c.execute("SELECT AVG(accuracy), COUNT(race_id) FROM predictions WHERE chat_id = ? AND scored = 1", (chat_id,)).fetchone()
         
@@ -714,7 +730,9 @@ def get_detailed_profile_text(chat_id):
     
     text += f"🎴 *Собрано пилотов:* {unique} из {total_drivers}\n"
     text += f"🍀 *Текущий шанс на Особую:* {0.01 + sp_pity:.2f}%\n"
-    text += f"🟡 *Текущий шанс на Легенду:* {0.1 + leg_pity:.2f}%\n\n"
+    text += f"🟡 *Текущий шанс на Легенду:* {0.1 + leg_pity:.2f}%\n"
+    text += f"🟣 *Текущий шанс на Мифик:* {1.0 + myth_pity:.2f}%\n"
+    text += f"🔵 *Текущий шанс на Эпик:* {4.0 + epic_pity:.2f}%\n\n"
     
     if unique > 0:
         text += "*Топ-5 карточек в гараже:*\n"
