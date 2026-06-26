@@ -483,7 +483,7 @@ def get_gacha_text_and_kb(chat_id: int):
         c = conn.cursor()
         
         try:
-            pulls_data = c.execute("SELECT total_pulls FROM users WHERE chat_id = ?").fetchone()
+            pulls_data = c.execute("SELECT total_pulls FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
             total_pulls = pulls_data[0] if pulls_data and pulls_data[0] is not None else 0
         except sqlite3.OperationalError:
             total_pulls = 0
