@@ -681,6 +681,16 @@ async def start_prediction(message: types.Message, state: FSMContext):
         race_id = f"{race['season']}_{race['round']}"
         race_name = race['raceName']
         
+        race_date = race.get('date')
+        race_time = race.get('time', '00:00:00Z')
+        
+        if race_date and race_time:
+            start_dt = datetime.strptime(f"{race_date} {race_time}", "%Y-%m-%d %H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
+            now_utc = datetime.now(ZoneInfo("UTC"))
+            
+            if now_utc >= start_dt:
+                return await tmp_msg.edit_text(f"🚫 *Прием прогнозов закрыт!*\n\nГонка {race_name} уже началась. Увидимся на следующем этапе!", parse_mode="Markdown")
+
         with sqlite3.connect(DB_PATH) as conn:
             c = conn.cursor()
             existing = c.execute("SELECT p1, p2, p3 FROM predictions WHERE chat_id = ? AND race_id = ?", (message.chat.id, race_id)).fetchone()
