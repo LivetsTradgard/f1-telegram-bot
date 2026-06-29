@@ -3,11 +3,16 @@ import json
 import aiohttp
 from config import API_URL
 
+if not os.path.exists('cache'):
+    os.makedirs('cache')
+
 async def fetch_f1_data(endpoint: str, params: dict = None) -> dict:
     cache_key = endpoint.replace('/', '_')
     if params:
         cache_key += "_" + "_".join([f"{k}_{v}" for k, v in params.items()])
-    cache_file = f"cache_{cache_key}.json"
+    
+    #путь ведет в папку cache/
+    cache_file = os.path.join('cache', f"cache_{cache_key}.json")
 
     try:
         timeout = aiohttp.ClientTimeout(total=15)
