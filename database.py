@@ -1,6 +1,16 @@
 import sqlite3
 from config import DB_PATH
 
+#цены обмена дубликатов
+EXCHANGE_RATES = {
+    "common": 200,
+    "rare": 400,
+    "epic": 800,
+    "mythic": 1500,
+    "legendary": 3000,
+    "special": 6000
+}
+
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -15,7 +25,8 @@ def init_db():
                                        ("mythic_pity", "REAL", "0.0"),
                                        ("epic_pity", "REAL", "0.0"),
                                        ("total_pulls", "INTEGER", "0"),
-                                       ("reminded", "INTEGER", "0")]:
+                                       ("reminded", "INTEGER", "0"),
+                                       ("balance", "INTEGER", "1000")]: #добавка баланса
             try:
                 c.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type} DEFAULT {default}")
             except sqlite3.OperationalError:
@@ -59,3 +70,28 @@ def update_notify_time(chat_id, minutes):
 def get_user_settings():
     with sqlite3.connect(DB_PATH) as conn:
         return [{"chat_id": row[0], "notify_time": row[1]} for row in conn.execute("SELECT chat_id, notify_time FROM users")]
+
+# НОВЫЕ ФУНКЦИИ ЭКОНОМИКИ
+
+def get_balance(chat_id: int) -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        res = conn.execute("SELECT balance FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        return res[0] if res else 1000
+
+def update_balance(chat_id: int, amount: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE users SET balance = balance + ? WHERE chat_id = ?", (amount, chat_id))
+
+def get_user_duplicates(chat_id: int) -> list:
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute("SELECT driver_id, rarity, count FROM inventory WHERE chat_id = ? AND count > 1", (chat_id,)).fetchall()
+
+def exchange_duplicate(chat_id: int, driver_id: str, rarity: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        res = conn.execute("SELECT count FROM inventory WHERE chat_id = ? AND driver_id = ?", (chat_id, driver_id)).fetchone()
+        if res and res[0] > 1:
+            conn.execute("UPDATE inventory SET count = count - 1 WHERE chat_id = ? AND driver_id = ?", (chat_id, driver_id))
+            reward = EXCHANGE_RATES.get(rarity, 0)
+            conn.execute("UPDATE users SET balance = balance + ? WHERE chat_id = ?", (reward, chat_id))
+            return True
+    return False

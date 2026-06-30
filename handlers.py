@@ -13,7 +13,9 @@ import asyncio
 
 from config import DB_PATH
 import data
-from database import add_user, update_notify_time, get_user_settings
+from database import (add_user, update_notify_time, get_user_settings, 
+                      get_balance, update_balance, get_user_duplicates, 
+                      exchange_duplicate, EXCHANGE_RATES)
 from api import fetch_f1_data, fetch_weather, get_weather_emoji
 from utils import get_reply_keyboard, generate_drivers_kb, extract_all_sessions
 from services import get_gacha_text_and_kb, get_detailed_profile_text, get_leaderboard_text_and_kb
@@ -162,6 +164,170 @@ async def back_to_gacha(callback: types.CallbackQuery):
     text, kb = get_gacha_text_and_kb(callback.message.chat.id)
     await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     await callback.answer()
+
+# ЭКОНОМИКА -------------------------------------------------
+
+@dp.callback_query(F.data == 'gacha_roll_money')
+async def pull_money_card(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    balance = get_balance(chat_id)
+    
+    if balance < 500:
+        return await callback.answer(f"Недостаточно средств! Твой баланс: {balance}$", show_alert=True)
+        
+    now = int(time.time())
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        
+        # Списываем 500$ сразу
+        c.execute("UPDATE users SET balance = balance - 500 WHERE chat_id = ?", (chat_id,))
+        
+        try:
+            user_data = c.execute("SELECT special_pity, legendary_pity, mythic_pity, epic_pity, total_pulls FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        except sqlite3.OperationalError:
+            user_data = c.execute("SELECT special_pity, legendary_pity, mythic_pity, epic_pity FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+            user_data = (*user_data, 0)
+            
+        sp_pity, leg_pity, myth_pity, epic_pity = user_data[0], user_data[1], user_data[2], user_data[3]
+        total_pulls = (user_data[4] if user_data[4] is not None else 0) + 1
+        
+        is_hard_pity = False
+        
+        if total_pulls % 140 == 0:
+            rarity = "special"
+            is_hard_pity = True
+            new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity, leg_pity, myth_pity, epic_pity
+        elif total_pulls % 70 == 0:
+            rarity = "legendary"
+            is_hard_pity = True
+            new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity, leg_pity, myth_pity, epic_pity
+        else:
+            sp_chance = 0.01 + sp_pity
+            leg_chance = 0.1 + leg_pity
+            myth_chance = 1.0 + myth_pity
+            epic_chance = 4.0 + epic_pity
+            
+            roll = random.uniform(0, 100)
+            
+            if roll <= sp_chance:
+                rarity = "special"
+                new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = 0.0, leg_pity + 0.05, myth_pity + 0.1, epic_pity + 0.2
+            elif roll <= sp_chance + leg_chance:
+                rarity = "legendary"
+                new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity + 0.01, 0.0, myth_pity + 0.1, epic_pity + 0.2
+            elif roll <= sp_chance + leg_chance + myth_chance:
+                rarity = "mythic"
+                new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity + 0.01, leg_pity + 0.05, 0.0, epic_pity + 0.2
+            elif roll <= sp_chance + leg_chance + myth_chance + epic_chance:
+                rarity = "epic"
+                new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity + 0.01, leg_pity + 0.05, myth_pity + 0.1, 0.0
+            elif roll <= sp_chance + leg_chance + myth_chance + epic_chance + 25.0:
+                rarity = "rare"
+                new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity + 0.01, leg_pity + 0.05, myth_pity + 0.1, epic_pity + 0.2
+            else:
+                rarity = "common"
+                new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity = sp_pity + 0.01, leg_pity + 0.05, myth_pity + 0.1, epic_pity + 0.2
+        
+        driver = random.choice(data.DRIVERS_DB[rarity])
+        c.execute("SELECT count FROM inventory WHERE chat_id = ? AND driver_id = ?", (chat_id, driver['id']))
+        existing_card = c.fetchone()
+        
+        xp_rewards = {"common": 15, "rare": 30, "epic": 60, "mythic": 100, "legendary": 200, "special": 500}
+        reward = xp_rewards[rarity]
+        
+        is_duplicate = False
+        if existing_card:
+            is_duplicate = True
+            c.execute("UPDATE users SET xp = xp + ? WHERE chat_id = ?", (reward, chat_id))
+        
+        c.execute("""
+            INSERT INTO inventory (chat_id, driver_id, rarity, count) 
+            VALUES (?, ?, ?, 1) 
+            ON CONFLICT(chat_id, driver_id) DO UPDATE SET count = count + 1
+        """, (chat_id, driver['id'], rarity))
+        
+        try:
+            c.execute("UPDATE users SET special_pity = ?, legendary_pity = ?, mythic_pity = ?, epic_pity = ?, total_pulls = ? WHERE chat_id = ?", 
+                      (new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity, total_pulls, chat_id))
+        except sqlite3.OperationalError:
+            c.execute("UPDATE users SET special_pity = ?, legendary_pity = ?, mythic_pity = ?, epic_pity = ? WHERE chat_id = ?", 
+                      (new_sp_pity, new_leg_pity, new_myth_pity, new_epic_pity, chat_id))
+
+    rarity_name = data.RARITY_INFO[rarity]['name']
+    prefix = "🛡 *ГАРАНТ!*\n" if is_hard_pity else ""
+    msg = f"🎰 *-500$*\n\n{prefix}Выпал {rarity_name} {driver['name']} " + ("*(Дубликат! ✨ +{} XP)*".format(reward) if is_duplicate else "🎉")
+           
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в Гараж", callback_data="back_to_gacha")]])
+    await callback.message.edit_text(msg, parse_mode="Markdown", reply_markup=kb)
+
+@dp.callback_query(F.data == 'garage_exchange')
+async def show_exchange_menu(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    duplicates = get_user_duplicates(chat_id)
+    
+    if not duplicates:
+        return await callback.answer("У тебя нет дубликатов для обмена!", show_alert=True)
+
+    buttons = []
+    for driver_id, rarity, count in duplicates:
+        reward = EXCHANGE_RATES.get(rarity, 0)
+        
+        driver_name = driver_id
+        for d in data.DRIVERS_DB.get(rarity, []):
+            if d['id'] == driver_id:
+                driver_name = d['name']
+                break
+        
+        text = f"[{count} шт] {driver_name} -> +{reward}$"
+        cb_data = f"exch_conf_{driver_id}_{rarity}"
+        buttons.append([InlineKeyboardButton(text=text, callback_data=cb_data)])
+        
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад в гараж", callback_data="back_to_gacha")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    await callback.message.edit_text("♻️ *Обмен дубликатов*\nВыбери карточку, чтобы продать одну копию:", reply_markup=keyboard, parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith('exch_conf_'))
+async def confirm_exchange(callback: types.CallbackQuery):
+    _, _, driver_id, rarity = callback.data.split('_', 3)
+    reward = EXCHANGE_RATES.get(rarity, 0)
+    
+    driver_name = driver_id
+    for d in data.DRIVERS_DB.get(rarity, []):
+        if d['id'] == driver_id:
+            driver_name = d['name']
+            break
+            
+    rarity_name = data.RARITY_INFO[rarity]['name']
+            
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Продать копию", callback_data=f"exch_do_{driver_id}_{rarity}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="garage_exchange")]
+    ])
+    
+    await callback.message.edit_text(
+        f"Точно хочешь обменять один дубликат карточки **{driver_name}** ({rarity_name})?\n"
+        f"Ты получишь: **+{reward}$**", 
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith('exch_do_'))
+async def execute_exchange(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    _, _, driver_id, rarity = callback.data.split('_', 3)
+    
+    success = exchange_duplicate(chat_id, driver_id, rarity)
+    
+    if success:
+        reward = EXCHANGE_RATES.get(rarity, 0)
+        new_balance = get_balance(chat_id)
+        await callback.answer(f"✅ Успешно! Начислено {reward}$. Твой баланс: {new_balance}$", show_alert=True)
+        await show_exchange_menu(callback)
+    else:
+        await callback.answer("❌ Ошибка. Возможно, дубликатов больше нет.", show_alert=True)
+        await show_exchange_menu(callback)
 
 
 @dp.message(F.text == '🔮 Прогнозы на подиум')

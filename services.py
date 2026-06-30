@@ -1,5 +1,6 @@
 import sqlite3
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from database import get_balance
 
 from config import DB_PATH
 import data
@@ -7,6 +8,7 @@ from utils import get_rank_info
 
 def get_gacha_text_and_kb(chat_id: int):
     total_drivers = sum(len(cat) for cat in data.DRIVERS_DB.values())
+    balance = get_balance(chat_id)
     
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -25,6 +27,7 @@ def get_gacha_text_and_kb(chat_id: int):
     next_spec = 140 - (total_pulls % 140)
         
     text = (f"🎴 *Твой гараж*\n\n"
+            f"💰 *Твой баланс:* {balance}$\n\n"
             f"Прогресс коллекции: {unique} из {total_drivers} пилотов\n"
             f"Всего карточек: {count}\n"
             f"🔄 Открыто паков: {total_pulls}\n\n"
@@ -51,7 +54,9 @@ def get_gacha_text_and_kb(chat_id: int):
                 text += "\n"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎰 Открыть", callback_data="pull_card")]
+        [InlineKeyboardButton(text="🎁 Открыть (Бесплатно)", callback_data="pull_card")],
+        [InlineKeyboardButton(text="🎰 Открыть (500$)", callback_data="gacha_roll_money")],
+        [InlineKeyboardButton(text="♻️ Обмен дубликатов", callback_data="garage_exchange")]
     ])
     
     return text, kb
