@@ -267,7 +267,9 @@ async def show_exchange_menu(callback: types.CallbackQuery):
     duplicates = get_user_duplicates(chat_id)
     
     if not duplicates:
-        return await callback.answer("У тебя нет дубликатов для обмена!", show_alert=True)
+        await callback.answer("У тебя нет дубликатов для обмена!", show_alert=True)
+        text, kb = get_gacha_text_and_kb(chat_id)
+        return await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
 
     buttons = []
     for driver_id, rarity, count in duplicates:
